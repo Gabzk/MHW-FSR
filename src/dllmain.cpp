@@ -57,6 +57,8 @@ void Start(HMODULE module) {
         LOGE("NGX hooks failed, plugin inactive");
         return;
     }
+    // Only now do the game hooks act; until here they call straight through to the game.
+    game::Activate(g_config);
     LOGI("ready; turn on NVIDIA DLSS in the game's graphics options");
 }
 

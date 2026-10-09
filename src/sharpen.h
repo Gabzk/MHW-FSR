@@ -30,7 +30,7 @@ ID3D11Resource* Target11(ID3D11Device* device, unsigned width, unsigned height, 
 bool Apply11(ID3D11DeviceContext* ctx, ID3D11Resource* output, unsigned x, unsigned y, Sharpener filter,
              float strength, bool hdr);
 
-// Drops all GPU objects (NGX shutdown / device change).
-void Release();
+// Drops the GPU objects of one API (NGX shutdown). D3D12 objects are retired, not freed at once.
+void Release(bool d3d12);
 
 }  // namespace mhwdlss::sharpen

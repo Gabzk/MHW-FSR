@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 
 #include "config.h"
 #include "log.h"
@@ -98,6 +99,24 @@ std::atomic<uint64_t> g_jitterFrames{0};
 std::atomic<uint64_t> g_jitterSetByPlugin{0};
 std::atomic<uint64_t> g_sharpenSuppressed{0};
 
+// The hooks run on several game threads at once (the TAA pass is built on worker threads, the
+// update on the main thread), so they read their settings from here, published by ApplyConfig,
+// instead of from g_config while an ini reload replaces it.
+struct HookSettings {
+    std::atomic<bool> bypass{false};
+    std::atomic<bool> forceJitter{true};
+    std::atomic<bool> fullPixelJitter{true};
+    std::atomic<bool> verboseFrames{false};
+    std::atomic<bool> debugFixedJitter{false};
+    std::atomic<float> debugJitterX{0.0f};
+    std::atomic<float> debugJitterY{0.0f};
+};
+HookSettings g_settings;
+// Until the NGX side is installed the hooks only call the game's functions.
+std::atomic<bool> g_active{false};
+std::atomic<bool> g_dlssUnavailable{false};
+void (*g_updateCallback)() = nullptr;
+
 struct JitterRecord {
     const void* resource11 = nullptr;
     const void* resource12 = nullptr;
@@ -130,8 +149,9 @@ void CaptureJitter(uint8_t* taa) {
     rec.resource12 = mem::SafeRead<void*>(*native + kNativeResource12).value_or(nullptr);
     rec.jitter = {(*jitter)[0], (*jitter)[1], *frame};
 
-    static uint64_t logged = 0;
-    if (logged < 4 || (g_config.verboseFrames && logged < 40)) {
+    static std::atomic<uint64_t> logged{0};
+    uint64_t n = logged.load();
+    if (n < 4 || (g_settings.verboseFrames && n < 40)) {
         ++logged;
         // Inputs of the TAA update's jitter decision, to explain a zero jitter.
         LOGI("jitter capture: frame {}, slot {}, jitter {:.4f},{:.4f}, camera frame {}, render frame {}, blend {:.3f}, "
@@ -176,10 +196,16 @@ void PatchViewDepth(uint8_t* drawContext) {
     auto* native = static_cast<uint8_t*>(*colorNative);
     auto count = mem::SafeRead<LONG>(native + kNativeRefCount);
     if (!count || *count <= 0) return;  // not a live native
-    InterlockedIncrement(reinterpret_cast<volatile LONG*>(native + kNativeRefCount));
-    *depthNative = *colorNative;
+    // The pass can be built on two threads at once; only the thread that installs the alias keeps
+    // the reference it took.
+    auto* refs = reinterpret_cast<volatile LONG*>(native + kNativeRefCount);
+    LONG references = InterlockedIncrement(refs);
+    if (InterlockedCompareExchangePointer(depthNative, *colorNative, nullptr) != nullptr) {
+        InterlockedDecrement(refs);
+        return;
+    }
     LOGI("game: depth copy texture {} given its native {} as depth view (references {})", static_cast<void*>(*depth),
-         *colorNative, *count + 1);
+         *colorNative, references);
 }
 
 // The Halton entry the TAA update gives the camera this frame (scene + 0xe6a0, frame % 20).
@@ -256,6 +282,11 @@ std::mutex g_aaMutex;
 uint8_t* g_aaScene = nullptr;
 bool g_aaHeld = false;
 uint16_t g_aaGame = 0;  // the game's own setting, last seen
+bool g_aaOurs = false;  // the word still holds what the plugin wrote (the game has not set it since)
+
+// Bypass shows the game's TAA instead of DLSS, in DLAA only: the upscaling modes need the TAA
+// pass and the jitter for DLSS at the DLISP position either way.
+bool Bypassed() { return g_settings.bypass && !DlispActive(); }
 
 std::string AaName(uint16_t value) {
     switch (value) {
@@ -274,70 +305,58 @@ void HoldTaaOnly() {
     if (scene != g_aaScene) {
         g_aaScene = scene;
         g_aaHeld = false;
+        g_aaOurs = false;
     }
     auto* word = reinterpret_cast<volatile uint16_t*>(scene + g_sceneAa);
     uint16_t current = *word;
+    if (current != kAaTaaOnly) g_aaOurs = false;  // the game has set it since
     bool dlss = DlssEnabledInGame();
-    if (dlss && !g_config.bypass) {
+    bool bypassed = Bypassed();
+    bool unavailable = g_dlssUnavailable;
+    if (dlss && !bypassed && !unavailable) {
         // Any other value was set by the game (at start, or when it applied the options again).
         if (current != kAaTaaOnly) {
             if (!g_aaHeld || current != g_aaGame)
                 LOGI("anti-aliasing: the game set {}; TAA only while DLSS runs", AaName(current));
             g_aaGame = current;
             *word = kAaTaaOnly;
-        } else if (!g_aaHeld) {
-            g_aaGame = current;
+            g_aaOurs = true;
+        } else if (!g_aaHeld && !g_aaOurs) {
+            g_aaGame = current;  // TAA only is the game's own setting
         }
         g_aaHeld = true;
     } else if (g_aaHeld) {
         g_aaHeld = false;
         // Turning DLSS off makes the game apply the option again (after clearing the DLSS state
-        // checked above), so only a hold the plugin ends itself (Bypass) has a setting to give back.
-        if (dlss && current == kAaTaaOnly && g_aaGame != kAaTaaOnly) {
+        // checked above), so only a hold the plugin ends itself has a setting to give back.
+        if (dlss && g_aaOurs && g_aaGame != kAaTaaOnly) {
             *word = g_aaGame;
-            LOGI("anti-aliasing: back to the game's {}", AaName(g_aaGame));
+            g_aaOurs = false;
+            LOGI("anti-aliasing: back to the game's {} ({})", AaName(g_aaGame),
+                 unavailable ? "DLSS is not available" : "Bypass");
         }
     }
 }
 
-// Scene parameters may turn the TAA jitter off (the title screen does). DLSS needs the
-// sub-pixel jitter, so it is switched on for the duration of the update that applies it.
-// The update runs every frame, also while the TAA filter is switched off.
-void* __fastcall HookTaaUpdate(void* self) {
-    HoldTaaOnly();
-    if (!DlssEnabledInGame() || g_config.bypass) return g_origTaaUpdate(self);
-    auto* taa = static_cast<uint8_t*>(self);
-    auto* enable = taa + kTaaJitterEnable;
-    uint8_t saved = *enable;
-    if (g_config.forceJitter) *enable = 1;
-    void* result = g_origTaaUpdate(self);
-    *enable = saved;
-    ++g_jitterFrames;
-    if (g_config.debugFixedJitter) {
-        // Constant jitter for checking the sign convention (DLSS guide, section 8.4.2).
-        if (uint8_t* camera = g_camera ? *g_camera : nullptr) {
-            auto* jitter = reinterpret_cast<float*>(camera + kCameraJitter);
-            jitter[0] = g_config.debugJitterX;
-            jitter[1] = g_config.debugJitterY;
-        }
-        return result;
-    }
-    if (g_config.forceJitter) EnsureJitter(taa);
-    if (g_config.fullPixelJitter) WidenJitter();
-    return result;
-}
+// The pass can be built on two threads at once for the same filter, so the TAA sharpen flag is
+// cleared by the first build that starts and restored by the last one that ends.
+struct SharpenHold {
+    int builds = 0;
+    uint8_t saved = 0;
+    bool cleared = false;
+};
+std::mutex g_sharpenMutex;
+std::unordered_map<uint8_t*, SharpenHold> g_sharpenHolds;
 
-void* __fastcall HookTaaDraw(void* self, void* drawContext) {
-    static std::atomic<uint64_t> calls{0};
-    if (calls.fetch_add(1) == 0) LOGI("game: first TAA draw (filter {})", self);
-    if (g_frameCallback) g_frameCallback();
-    auto* taa = static_cast<uint8_t*>(self);
-    bool dlss = DlssEnabledInGame();
-    // With the TAA sharpen pass on, the game points DLSS at the next history slot and then has the
-    // sharpen pass write the sharpened TAA result over it. The pass stays off while DLSS runs.
-    uint8_t sharpen = taa[kTaaSharpen];
-    bool suppress = dlss && !g_config.bypass && sharpen;
-    if (suppress) {
+class SharpenGuard {
+public:
+    SharpenGuard(uint8_t* taa, bool suppress) : taa_(taa) {
+        std::lock_guard lock(g_sharpenMutex);
+        SharpenHold& h = g_sharpenHolds[taa];
+        if (h.builds++ > 0) return;
+        h.saved = taa[kTaaSharpen];
+        h.cleared = suppress && h.saved;
+        if (!h.cleared) return;
         taa[kTaaSharpen] = 0;
         ++g_sharpenSuppressed;
         static bool logged = false;
@@ -347,11 +366,63 @@ void* __fastcall HookTaaDraw(void* self, void* drawContext) {
                  mem::SafeRead<float>(taa + 0x198).value_or(-1.0f));
         }
     }
+    ~SharpenGuard() {
+        std::lock_guard lock(g_sharpenMutex);
+        auto it = g_sharpenHolds.find(taa_);
+        if (it == g_sharpenHolds.end() || --it->second.builds > 0) return;
+        if (it->second.cleared) taa_[kTaaSharpen] = it->second.saved;
+        g_sharpenHolds.erase(it);
+    }
+    SharpenGuard(const SharpenGuard&) = delete;
+    SharpenGuard& operator=(const SharpenGuard&) = delete;
+
+private:
+    uint8_t* taa_;
+};
+
+// Scene parameters may turn the TAA jitter off (the title screen does). DLSS needs the
+// sub-pixel jitter, so it is switched on for the duration of the update that applies it.
+// The update runs every frame, also while the TAA filter is switched off.
+void* __fastcall HookTaaUpdate(void* self) {
+    if (!g_active) return g_origTaaUpdate(self);
+    if (g_updateCallback) g_updateCallback();
+    HoldTaaOnly();
+    if (!DlssEnabledInGame() || Bypassed()) return g_origTaaUpdate(self);
+    auto* taa = static_cast<uint8_t*>(self);
+    auto* enable = taa + kTaaJitterEnable;
+    uint8_t saved = *enable;
+    bool forceJitter = g_settings.forceJitter;
+    if (forceJitter) *enable = 1;
+    void* result = g_origTaaUpdate(self);
+    *enable = saved;
+    ++g_jitterFrames;
+    if (g_settings.debugFixedJitter) {
+        // Constant jitter for checking the sign convention (DLSS guide, section 8.4.2).
+        if (uint8_t* camera = g_camera ? *g_camera : nullptr) {
+            auto* jitter = reinterpret_cast<float*>(camera + kCameraJitter);
+            jitter[0] = g_settings.debugJitterX;
+            jitter[1] = g_settings.debugJitterY;
+        }
+        return result;
+    }
+    if (forceJitter) EnsureJitter(taa);
+    if (g_settings.fullPixelJitter) WidenJitter();
+    return result;
+}
+
+void* __fastcall HookTaaDraw(void* self, void* drawContext) {
+    if (!g_active) return g_origTaaDraw(self, drawContext);
+    static std::atomic<uint64_t> calls{0};
+    if (calls.fetch_add(1) == 0) LOGI("game: first TAA draw (filter {})", self);
+    if (g_frameCallback) g_frameCallback();
+    auto* taa = static_cast<uint8_t*>(self);
+    bool dlss = DlssEnabledInGame();
+    // With the TAA sharpen pass on, the game points DLSS at the next history slot and then has the
+    // sharpen pass write the sharpened TAA result over it. The pass stays off while DLSS runs.
+    SharpenGuard sharpen(taa, dlss && !Bypassed());
     if (dlss) PatchViewDepth(static_cast<uint8_t*>(drawContext));
     CaptureJitter(taa);
-    void* result = g_origTaaDraw(self, drawContext);
-    if (suppress) taa[kTaaSharpen] = sharpen;
-    return result;
+    return g_origTaaDraw(self, drawContext);
 }
 
 uint8_t* ExeBase() { return reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)); }
@@ -461,6 +532,30 @@ void* ImmediateContext11() {
 void* GameAlloc(size_t size) { return g_operatorNew ? g_operatorNew(size) : nullptr; }
 
 void SetFrameCallback(void (*callback)()) { g_frameCallback = callback; }
+
+void SetUpdateCallback(void (*callback)()) { g_updateCallback = callback; }
+
+void ApplyConfig(const Config& config) {
+    g_settings.bypass = config.bypass;
+    g_settings.forceJitter = config.forceJitter;
+    g_settings.fullPixelJitter = config.fullPixelJitter;
+    g_settings.verboseFrames = config.verboseFrames;
+    g_settings.debugFixedJitter = config.debugFixedJitter;
+    g_settings.debugJitterX = config.debugJitterX;
+    g_settings.debugJitterY = config.debugJitterY;
+}
+
+void Activate(const Config& config) {
+    ApplyConfig(config);
+    g_active = true;
+}
+
+uint64_t Frame() {
+    uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
+    return renderer ? mem::SafeRead<uint64_t>(renderer + kRendererFrame).value_or(0) : 0;
+}
+
+void SetDlssUnavailable(bool unavailable) { g_dlssUnavailable = unavailable; }
 
 uint8_t* Device() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;

@@ -19,10 +19,13 @@ using Microsoft::WRL::ComPtr;
 // the game (which runs at most a few frames ahead of the GPU) has finished with it.
 void Retire(std::function<void()> release);
 void Retire(ComPtr<ID3D12Resource> resource);
-// Once per frame, with a running frame count; releases what has been retired long enough.
+// An NGX feature: retired like the rest, but RetireFlushFeatures can release it early.
+void RetireFeature(std::function<void()> release);
+// With the game's renderer frame counter, as often as wanted: releases what has been retired for
+// long enough, counted in distinct frames.
 void RetireTick(uint64_t frame);
-// Releases everything retired now (NGX shutdown).
-void RetireFlush();
+// Releases the retired NGX features now: they must be gone before NGX shuts down.
+void RetireFlushFeatures();
 
 struct TextureInfo {
     unsigned width = 0;

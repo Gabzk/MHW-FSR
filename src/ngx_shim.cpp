@@ -240,6 +240,7 @@ bool StaleFrame(Feature& f, unsigned width, unsigned height) {
 
 NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* p) {
     if (!p) return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    std::lock_guard lock(g_mutex);  // g_config is replaced under it on ini reloads
     unsigned w = GetUI(p, NVSDK_NGX_Parameter_Width);
     unsigned h = GetUI(p, NVSDK_NGX_Parameter_Height);
     float scale = g_config.RenderScale();
@@ -297,6 +298,8 @@ void ShutdownLegacy() {
     g_legacyParams = nullptr;
 }
 
+bool InitModern(Api api, void* device);
+
 bool EnsureModern(Api api, void* device) {
     if (g_modern.attempted) {
         if (g_modern.ready && (g_modern.api != api || g_modern.device != device)) {
@@ -306,6 +309,12 @@ bool EnsureModern(Api api, void* device) {
         }
         return g_modern.ready;
     }
+    bool ready = InitModern(api, device);
+    game::SetDlssUnavailable(!ready);
+    return ready;
+}
+
+bool InitModern(Api api, void* device) {
     g_modern = {};
     g_modern.attempted = true;
     g_modern.api = api;
@@ -399,7 +408,7 @@ void ReleaseDlss(Feature& f) {
     if (!handle) return;
     f.dlss.handle = nullptr;
     if (f.api == Api::D3D12) {
-        d3d::Retire([handle] {
+        d3d::RetireFeature([handle] {
             NVSDK_NGX_Result r = NVSDK_NGX_D3D12_ReleaseFeature(handle);
             if (NVSDK_NGX_FAILED(r)) LOGW("DLSS release failed ({:#x})", static_cast<unsigned>(r));
         });
@@ -681,6 +690,17 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
         return NVSDK_NGX_Result_Success;
     }
 
+    // DLAA does not use the copies the upscaling modes keep.
+    g_upscale.valid = false;
+    g_upscale.motion = g_upscale.depth = nullptr;
+    if (f.api == Api::D3D12) {
+        g_upscale.motion12.Reset();
+        g_upscale.depth12.Reset();
+    } else {
+        g_upscale.motion11.Reset();
+        g_upscale.depth11.Reset();
+    }
+
     if (g_config.bypass) return NVSDK_NGX_Result_Success;  // the game's TAA result stays
     if (StaleFrame(f, rect.width, rect.height)) return NVSDK_NGX_Result_Success;
     if (!EnsureModern(f.api, DeviceOf(f.api, cmd))) return NVSDK_NGX_Result_Fail;
@@ -755,13 +775,24 @@ NVSDK_NGX_Result ShimShutdown(Api api) {
     LOGI("game called NGX {} Shutdown", ApiName(api));
     for (auto& f : g_features)
         if (f->api == api) ReleaseDlss(*f);
-    g_upscale.motion12.Reset();
-    g_upscale.depth12.Reset();
-    g_upscale = {};
-    // Retired features must go before NGX does.
-    d3d::RetireFlush();
-    sharpen::Release();
-    if (g_modern.api == api) ShutdownModern();
+    // Only what belongs to this API: both tables are hooked, and the game may shut down the one it
+    // does not render with.
+    g_upscale.valid = false;
+    g_upscale.motion = g_upscale.depth = nullptr;
+    if (api == Api::D3D12) {
+        g_upscale.motion12.Reset();
+        g_upscale.depth12.Reset();
+    } else {
+        g_upscale.motion11.Reset();
+        g_upscale.depth11.Reset();
+    }
+    sharpen::Release(api == Api::D3D12);
+    if (g_modern.api == api) {
+        // NGX would free remaining features itself when it shuts down, so the retired ones go now.
+        // Textures stay retired. The game shuts NGX down when it stops rendering (seen at exit).
+        d3d::RetireFlushFeatures();
+        ShutdownModern();
+    }
     if (auto legacy = reinterpret_cast<PfnShutdown>(State(api).legacy.shutdown)) {
         legacy();
         State(api).legacy = {};
@@ -985,44 +1016,12 @@ void AdoptContext(bool mayUseDxgi) {
          legacyLoaded ? "DLSS was refused by" : "no");
 }
 
+// At every TAA pass build: worker threads, possibly several per frame and at the same time.
 void OnFrame() {
     std::lock_guard lock(g_mutex);
     PatchTable(g_api[0], Api::D3D11, false);
     PatchTable(g_api[1], Api::D3D12, false);
     AdoptContext(true);
-
-    static uint64_t frames = 0;
-    d3d::RetireTick(++frames);
-    if (frames % 30 == 0) {
-        if (ReloadConfigIfChanged()) {
-            LogSetLevel(g_config.logLevel);
-            LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
-                 "exposure {}, bypass {}",
-                 QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
-                 g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
-                 g_config.bypass);
-            for (auto& f : g_features) {
-                f->dlss.failed = false;  // allow a retry with the new settings
-                f->evaluations = 0;      // log the next evaluations in detail again
-                f->resetNext = true;     // start from an empty history
-            }
-            g_probeRequested = g_config.debugProbe;
-            g_dumpOutputRequested = g_config.debugDumpOutput;
-            if (g_config.debugDumpFrames > 0)
-                probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
-                                        static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
-            if (game::DlssEnabledInGame() && game::RecomputeRenderScale()) LOGI("render scale refreshed");
-        }
-        ReloadGameOptionsIfChanged();
-        static float lastSharpness = -1.0f;
-        static Sharpener lastSharpener = Sharpener::NVSharpen;
-        if (g_config.Sharpness() != lastSharpness || g_config.sharpener != lastSharpener) {
-            lastSharpness = g_config.Sharpness();
-            lastSharpener = g_config.sharpener;
-            LOGI("sharpening {:.2f} with {} (from {})", lastSharpness, SharpenerName(lastSharpener),
-                 g_config.sharpness < 0.0f ? "the game's DLSS Sharpness option" : "the ini");
-        }
-    }
 
     // The game creates its DLISP feature only when DLSS is (re)created. After switching from DLAA
     // to an upscaling mode at run time, give it one so the DLISP pass has a handle to use.
@@ -1043,9 +1042,50 @@ void OnFrame() {
     }
 }
 
-}  // namespace
+// Once per frame on the game's main thread, where the game applies graphics options itself.
+void OnUpdate() {
+    bool recompute = false;
+    {
+        std::lock_guard lock(g_mutex);
+        d3d::RetireTick(game::Frame());
+        static unsigned updates = 0;
+        if (++updates % 30 != 0) return;
+        if (ReloadConfigIfChanged()) {
+            game::ApplyConfig(g_config);
+            LogSetLevel(g_config.logLevel);
+            LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
+                 "exposure {}, bypass {}",
+                 QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
+                 g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
+                 g_config.bypass);
+            for (auto& f : g_features) {
+                f->dlss.failed = false;  // allow a retry with the new settings
+                f->evaluations = 0;      // log the next evaluations in detail again
+                f->resetNext = true;     // start from an empty history
+            }
+            g_probeRequested = g_config.debugProbe;
+            g_dumpOutputRequested = g_config.debugDumpOutput;
+            if (g_config.debugDumpFrames > 0)
+                probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
+                                        static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
+            recompute = game::DlssEnabledInGame();
+        }
+        ReloadGameOptionsIfChanged();
+        static float lastSharpness = -1.0f;
+        static Sharpener lastSharpener = Sharpener::NVSharpen;
+        if (g_config.Sharpness() != lastSharpness || g_config.sharpener != lastSharpener) {
+            lastSharpness = g_config.Sharpness();
+            lastSharpener = g_config.sharpener;
+            LOGI("sharpening {:.2f} with {} (from {})", lastSharpness, SharpenerName(lastSharpener),
+                 g_config.sharpness < 0.0f ? "the game's DLSS Sharpness option" : "the ini");
+        }
+    }
+    // Outside the lock: the game's recompute releases and creates its DLSS features through the
+    // shim and may wait for the render thread, which takes the lock to evaluate.
+    if (recompute && game::RecomputeRenderScale()) LOGI("render scale refreshed");
+}
 
-bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
+bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     std::lock_guard lock(g_mutex);
     g_dataDir = dataDir;
     g_gameDir = gameDir;
@@ -1068,12 +1108,19 @@ bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
 
     AdoptContext(false);
     game::SetFrameCallback(&OnFrame);
+    game::SetUpdateCallback(&OnUpdate);
     LOGI("renderer at install: {}", game::DescribeState());
+    return true;
+}
 
-    if (game::Context() && game::DlssEnabledInGame()) {
-        // The game picked its render scale with the old callback before we were loaded.
-        if (game::RecomputeRenderScale()) LOGI("DLSS was already on, render scale refreshed");
-    }
+}  // namespace
+
+bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
+    if (!InstallTables(dataDir, gameDir)) return false;
+    // Outside the lock (see OnUpdate). The game picked its render scale with the old callback
+    // before we were loaded.
+    if (game::Context() && game::DlssEnabledInGame() && game::RecomputeRenderScale())
+        LOGI("DLSS was already on, render scale refreshed");
     return true;
 }
 

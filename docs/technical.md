@@ -34,9 +34,15 @@ its application id. The plugin is loaded later (with the input system) and:
    but at native resolution (DLAA, which the original game never had) it kept the greyed-out
    Anti-Aliasing option. FXAA then ran over the DLSS image, and Off or FXAA switched off the TAA
    pass and with it DLSS.
-9. Keeps D3D12 textures and DLSS features it replaces alive for a few frames before freeing them.
-   D3D12 frees resources immediately, even while queued GPU work still uses them, which crashed
-   the GPU when the render resolution changed while the game was running.
+9. Keeps D3D12 textures and DLSS features it replaces alive for 16 game frames before freeing
+   them. D3D12 frees resources immediately, even while queued GPU work still uses them, which
+   crashed the GPU when the render resolution changed while the game was running.
+
+The game builds the TAA pass on worker threads, twice per frame and at the same time, and runs
+the TAA update once per frame on the main thread. The plugin reloads its ini and asks the game to
+recompute the render scale from that update (where the game applies graphics options itself),
+outside the lock the render thread takes for DLSS. The hooks only act once the NGX side is
+installed.
 
 ## Conventions
 

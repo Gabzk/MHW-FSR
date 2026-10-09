@@ -2,7 +2,8 @@
 
 DLSS 4 for Monster Hunter: World (Iceborne, game version 15.2x, tested on 15.23), as a native
 plugin DLL loaded by Stracker's Loader from `nativePC\plugins`. C++20, MSVC, CMake + Ninja.
-Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.7.2 at the time of writing).
+Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.7.3 at the time of writing).
+Releases are git tags (`v0.7.3`); the repo is private on GitHub (`odt1/MHWDLSS`).
 
 `README.md` is for players and belongs to the user, who rewrote its top part themselves. Keep it
 plain and non-technical, and don't restructure it without being asked. Developer detail goes here
@@ -60,7 +61,7 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
   `re\MonsterHunterWorld.exe.unpacked.exe` (Steamless at `C:\Applications\Steamless 0.5`). Image base
   0x140000000 (no ASLR), so exe addresses below are absolute VAs; the plugin logs RVAs (+0x...).
 - Plugin files in `nativePC\plugins`: `MHWDLSS.dll`, `MHWDLSS.ini` (hot-reloaded, checked every 30
-  frames by mtime), `MHWDLSS.log`, and the `MHWDLSS\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
+  frames by mtime from the TAA update), `MHWDLSS.log`, and the `MHWDLSS\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
   `custom\`). Never put a DLL directly in `nativePC\plugins`: the loader loads every DLL there.
 - The user also runs `MonsterHunterFixorld.dll` (their own swapchain/frame-latency/loading plugin;
   its log shows fps, hitches and `ResizeBuffers` with the swapchain format), `!CRCBypass.dll`,
@@ -80,8 +81,11 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
   the DLSS output to `MHWDLSS\output.bin` (D3D11 only; `tools\bin2png.py`). `DebugDumpFrames=N`
   dumps TAA-position colour/motion/depth/jitter (D3D12 only; `tools/motion_check.py`).
 - GPU faults: check the System log for `nvlddmkm` event 153 (they come in threes) and the game's
-  `ERR12 : Graphics device crashed.` handler. `tools/live/modetest.py <cycles>` switches Mode at run
-  time and stops at the first driver error.
+  `ERR12 : Graphics device crashed.` handler. `tools/live/modetest.py <cycles>` launches the game if
+  needed and switches Mode at run time; it stops at the first driver error, dead game or switch the
+  plugin did not reload. The packaged ini has LF line endings, the scripts keep whichever is there.
+  `bypasstest.py [switches]` checks the AA give-back with Bypass and VRAM across switches;
+  `bypassupscale.py` checks that Bypass in Performance keeps the hold and DLISP running.
 - Python: plain `python` has no numpy; use `uv run --quiet --with numpy --with pillow python -I x.py`
   (`--with capstone` for the RE scripts). In Git Bash heredocs `\\` collapses to `\`: write scripts
   with the Write tool instead.
@@ -131,12 +135,37 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
    +0xf0 separately. Without that reference (before 0.7.1) every texture rebuild destroyed the native
    twice: "exploded geometry" until a restart.
 10. **Anti-aliasing hold (0.7.2).** While DLSS runs, the scene's AA switches are held at TAA only
-    (see below), so FXAA never runs after DLSS and Off/FXAA can't switch DLSS off.
-11. **D3D12 retire queue (0.7.2).** D3D12 frees resources on the last Release even while queued
-    command lists use them. Replaced mirror textures and released NGX D3D12 features go to
-    `d3d::Retire` and are freed 16 `OnFrame` ticks later (`RetireFlush` at NGX shutdown). Freeing
-    them at once faulted the GPU (nvlddmkm 153, ERR12) on run-time Mode switches. NGX accepts a new
-    feature while the old one still exists. D3D11 releases stay immediate.
+    (see below), so FXAA never runs after DLSS and Off/FXAA can't switch DLSS off. Released (game
+    value given back) only by Bypass in DLAA or when NGX could not be initialised
+    (`game::SetDlssUnavailable`).
+11. **D3D12 retire queue (0.7.2, clock fixed in 0.7.3).** D3D12 frees resources on the last
+    Release even while queued command lists use them. Replaced mirror textures, the sharpen
+    target and released NGX D3D12 features go to `d3d::Retire` / `RetireFeature` and are freed 16
+    distinct renderer frames later (`RetireTick(game::Frame())` from the update callback). At NGX
+    shutdown only the retired features are flushed (NGX would free them anyway); textures and the
+    sharpen state stay retired. Freeing at once faulted the GPU (nvlddmkm 153, ERR12) on run-time
+    Mode switches. NGX accepts a new feature while the old one still exists. D3D11 releases stay
+    immediate. The motion/depth mirrors are retired as soon as the TAA position runs in DLAA.
+
+### Threads (0.7.3)
+
+- The TAA pass is built on worker threads, twice per frame and concurrently (two `HookTaaDraw`
+  calls with the same frame and slot on different threads). `OnFrame` (frame callback) therefore
+  only re-patches the NGX table, adopts the context and attaches DLISP, all under the shim mutex.
+  The depth-view alias uses a compare-exchange, and the TAA sharpen flag is cleared by the first
+  concurrent build and restored by the last (`SharpenGuard`).
+- The TAA update runs once per frame on the main thread, also while the TAA filter is switched off.
+  The update callback (`ngx::OnUpdate`) does the retire tick, the ini and graphics_option.ini
+  reloads (under the shim mutex) and then `RecomputeRenderScale` outside the mutex: the game's
+  recompute releases/creates DLSS features through the shim and the render thread takes the mutex
+  to evaluate. `Install` calls it outside the mutex too.
+- `g_config` is only replaced under the shim mutex; ngx_shim reads it under the mutex (including
+  `OptimalSettingsCallback`). The game hooks read `HookSettings` atomics published by
+  `game::ApplyConfig`. The log level is atomic.
+- The game hooks pass straight through until `game::Activate`, which dllmain calls only after
+  `ngx::Install` succeeded.
+- `Bypass` means DLAA only everywhere (`Bypassed()` = bypass && !DlispActive()): in the upscaling
+  modes jitter, the AA hold and the sharpen suppression stay on.
 
 ## Conventions (measured)
 
@@ -183,8 +212,9 @@ from the ini file itself by `0x1404413e0`):
   option and clears the renderer DLSS type via `0x14229bed0` before its AA apply), never on a
   plugin Mode change.
 - The plugin's `HoldTaaOnly` (game.cpp, called from the TAA update every frame) keeps the word at
-  0x0001 while DLSS runs and gives the game's value back only when Bypass ends the hold. The setter
-  is pattern-scanned for its offset only, not patched.
+  0x0001 while DLSS runs and gives the game's value back only when the plugin ends the hold
+  itself (Bypass in DLAA, NGX unavailable) and the word still holds the plugin's value
+  (`g_aaOurs`). The setter is pattern-scanned for its offset only, not patched.
 - Measured before the fix (DLAA, TAA+FXAA stored): FXAA ran after DLSS (static detail -0.3%, p99
   edge change ~4/255); scene TAA 0 skipped the TAA draw and with it DLSS (plain jaggies).
 
@@ -220,7 +250,8 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
 - `tools/live/` (ReadProcessMemory/WriteProcessMemory on the running game): `aapeek.py` (AA
   switches, filter flags, renderer DLSS fields), `aa_ab.py` (toggle a switch and capture),
   `natpeek.py` (texture natives and refcounts), `campeek.py` (camera), `modetest.py` (run-time Mode
-  switch test), `bypasstest.py` (AA give-back + VRAM leak check), `titletest.ps1`, `abmulti.ps1`
+  switch test), `bypasstest.py` (AA give-back + VRAM leak check), `bypassupscale.py` (Bypass in
+  Performance keeps the hold), `titletest.ps1`, `abmulti.ps1`
   (multi-frame A/B captures), `specshift.py`, `jitregion.py`, `blocky.py` (dump/capture analysis).
 
 ## History and open items
@@ -228,7 +259,14 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
 - 0.1 first DLSS 4 port; 0.2 RCAS, no UltraPerformance; 0.3 MV scale (0.5,-0.5); 0.4 NVSharpen;
   0.5 driver DLSS store + DLLPath, default sharpness; 0.6/0.7 Sharpener = NVSharpen | Vanilla |
   RCAS, Sharpness 0..1 per filter, default 0.33; 0.7.1 depth-view refcount (exploded geometry);
-  0.7.2 D3D12 retire queue (run-time Mode switch GPU fault) and anti-aliasing hold.
+  0.7.2 D3D12 retire queue (run-time Mode switch GPU fault) and anti-aliasing hold; 0.7.3 fixes
+  from a code review: retire clock on renderer frames, per-API NGX shutdown, Bypass DLAA-only,
+  thread safety (ini reload on the main thread, recompute outside the mutex, atomic hook settings,
+  depth-alias CAS, sharpen-flag guard), hooks inactive until NGX is installed, AA hold released
+  when NGX is unavailable, mirrors freed in DLAA, sharpen uses the retire queue, test scripts
+  handle LF inis.
+- Not exercised by tests: the NGX shutdown path (only at game exit; the test runs kill the game)
+  and the NGX-unavailable release.
 - To verify: run-time Mode switches with a real HDR10 swapchain (Windows HDR on, ScreenMode=HDRMode;
   the 0.7.2 tests ran with the swapchain in SDR format 87). The 0.7.1 fault happened in HDR mode.
 - Known content limits: weapon/specular shine shows render-pixel steps in the upscaling modes

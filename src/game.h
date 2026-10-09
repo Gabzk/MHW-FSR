@@ -7,6 +7,10 @@
 struct ID3D12Resource;
 struct ID3D11Resource;
 
+namespace mhwdlss {
+struct Config;
+}
+
 namespace mhwdlss::game {
 
 // Layout of the game's DLSS context object (0x48 bytes), the one stored at
@@ -26,8 +30,13 @@ struct Jitter {
     uint64_t frame = 0;
 };
 
-// Finds the game globals and hooks the TAA filter. Safe to call under the loader lock.
+// Finds the game globals and hooks the TAA filter. Safe to call under the loader lock. The hooks
+// pass straight through to the game until Activate.
 bool Init();
+// Makes the hooks act, once the NGX side is installed too, with the settings from `config`.
+void Activate(const Config& config);
+// Publishes the settings the hooks read (call after every ini load).
+void ApplyConfig(const Config& config);
 
 // The renderer's device wrapper and the DLSS context living in it.
 uint8_t* Device();
@@ -42,12 +51,24 @@ void* ImmediateContext11();
 // Allocates through the game's operator new, so the game may free the block itself.
 void* GameAlloc(size_t size);
 
-// Called once per TAA pass build (game thread), before the pass runs.
+// Called at every TAA pass build, before the pass is built. The game builds the pass on worker
+// threads, possibly more than once per frame and at the same time.
 void SetFrameCallback(void (*callback)());
+// Called once per frame on the game's main thread, from the TAA filter's update (which also runs
+// while the filter is switched off).
+void SetUpdateCallback(void (*callback)());
+
+// The renderer's frame counter (0 before the renderer exists).
+uint64_t Frame();
 
 // Re-runs the game's "DLSS settings changed" path so render scale and DLISP use come from
-// the current optimal-settings callback. Only call when the renderer is idle.
+// the current optimal-settings callback. Call from the update callback (main thread), where the
+// game applies graphics options itself, and without holding locks the render thread takes.
 bool RecomputeRenderScale();
+
+// NGX could not be initialised: DLSS cannot run this session, so the game's own anti-aliasing
+// setting is given back.
+void SetDlssUnavailable(bool unavailable);
 
 bool DlssEnabledInGame();
 

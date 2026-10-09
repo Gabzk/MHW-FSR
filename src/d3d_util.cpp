@@ -1,8 +1,10 @@
 #include "d3d_util.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -13,37 +15,46 @@ namespace mhwdlss::d3d {
 
 namespace {
 
-// Frames a retired object is kept. Generous: a frame can count more than once (several TAA
-// filters), and the game queues at most about three frames ahead of the GPU.
+// Game frames a retired object is kept. Generous: the game builds a frame on the CPU at most a
+// few frames ahead of the GPU.
 constexpr uint64_t kRetireFrames = 16;
 
 struct Retired {
-    uint64_t frame;
+    uint64_t age;  // value of g_frames when retired
+    bool feature;
     std::function<void()> release;
 };
 std::mutex g_retireMutex;
 std::deque<Retired> g_retired;
-uint64_t g_frame = 0;
+// Distinct game frames seen by RetireTick: callers may tick several times per frame.
+uint64_t g_frames = 0;
+uint64_t g_lastGameFrame = 0;
+
+void Push(std::function<void()> release, bool feature) {
+    if (!release) return;
+    std::lock_guard lock(g_retireMutex);
+    g_retired.push_back({g_frames, feature, std::move(release)});
+}
 
 }  // namespace
 
-void Retire(std::function<void()> release) {
-    if (!release) return;
-    std::lock_guard lock(g_retireMutex);
-    g_retired.push_back({g_frame, std::move(release)});
-}
+void Retire(std::function<void()> release) { Push(std::move(release), false); }
 
 void Retire(ComPtr<ID3D12Resource> resource) {
     if (!resource) return;
     Retire([r = std::move(resource)]() mutable { r.Reset(); });
 }
 
+void RetireFeature(std::function<void()> release) { Push(std::move(release), true); }
+
 void RetireTick(uint64_t frame) {
     std::deque<Retired> due;
     {
         std::lock_guard lock(g_retireMutex);
-        g_frame = frame;
-        while (!g_retired.empty() && frame >= g_retired.front().frame + kRetireFrames) {
+        if (frame == g_lastGameFrame) return;
+        g_lastGameFrame = frame;
+        ++g_frames;
+        while (!g_retired.empty() && g_frames >= g_retired.front().age + kRetireFrames) {
             due.push_back(std::move(g_retired.front()));
             g_retired.pop_front();
         }
@@ -51,13 +62,15 @@ void RetireTick(uint64_t frame) {
     for (auto& r : due) r.release();
 }
 
-void RetireFlush() {
-    std::deque<Retired> all;
+void RetireFlushFeatures() {
+    std::deque<Retired> features;
     {
         std::lock_guard lock(g_retireMutex);
-        all.swap(g_retired);
+        auto keep = std::stable_partition(g_retired.begin(), g_retired.end(), [](const Retired& r) { return !r.feature; });
+        std::move(keep, g_retired.end(), std::back_inserter(features));
+        g_retired.erase(keep, g_retired.end());
     }
-    for (auto& r : all) r.release();
+    for (auto& r : features) r.release();
 }
 
 TextureInfo Info(ID3D12Resource* resource) {

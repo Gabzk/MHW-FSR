@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 
@@ -10,7 +11,8 @@ namespace mhwdlss {
 namespace {
 std::mutex g_mutex;
 FILE* g_file = nullptr;
-LogLevel g_minLevel = LogLevel::Info;
+// Read without the lock by LogEnabled on every game thread.
+std::atomic<LogLevel> g_minLevel{LogLevel::Info};
 
 const char* LevelTag(LogLevel level) {
     switch (level) {
@@ -36,7 +38,7 @@ void LogSetLevel(LogLevel minLevel) {
     g_minLevel = minLevel;
 }
 
-bool LogEnabled(LogLevel level) { return static_cast<int>(level) >= static_cast<int>(g_minLevel); }
+bool LogEnabled(LogLevel level) { return static_cast<int>(level) >= static_cast<int>(g_minLevel.load()); }
 
 void LogWrite(LogLevel level, std::string_view text) {
     SYSTEMTIME st;

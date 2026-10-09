@@ -7,13 +7,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
+#include <memory>
 #include <utility>
 
 #pragma warning(push)
 #pragma warning(disable : 4324)  // NISConfig is padded to its 256-byte alignment on purpose
 #include "NIS_Config.h"
 #pragma warning(pop)
+#include "d3d_util.h"
 #include "log.h"
 #include "nis_hdr_cs.h"
 #include "nis_rs.h"
@@ -146,8 +147,6 @@ DXGI_FORMAT Typed(DXGI_FORMAT f) {
 // Descriptor pairs (SRV + UAV) used round robin; a pass writes its pair while recording, so the
 // ring must be longer than the number of frames in flight.
 constexpr UINT kDescriptorPairs = 64;
-// A replaced texture is kept for this many passes in case the GPU still uses it.
-constexpr uint64_t kRetirePasses = 16;
 
 struct State12 {
     ID3D12Device* device = nullptr;  // owned by the game
@@ -157,12 +156,10 @@ struct State12 {
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize = 0;
     UINT nextPair = 0;
-    uint64_t passes = 0;
 
     ComPtr<ID3D12Resource> target;
     unsigned width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    std::deque<std::pair<uint64_t, ComPtr<ID3D12Resource>>> retired;
 };
 State12 g12;
 
@@ -268,7 +265,8 @@ ID3D12Resource* Target12(ID3D12Device* device, unsigned width, unsigned height, 
     if (!device || !Init12(device)) return nullptr;
     format = Typed(format);
     if (g12.target && g12.width == width && g12.height == height && g12.format == format) return g12.target.Get();
-    if (g12.target) g12.retired.emplace_back(g12.passes, std::move(g12.target));
+    // The GPU may still be using the old one (see d3d::Retire).
+    d3d::Retire(std::move(g12.target));
 
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -301,8 +299,6 @@ ID3D12Resource* Target12(ID3D12Device* device, unsigned width, unsigned height, 
 bool Apply12(ID3D12GraphicsCommandList* cl, ID3D12Resource* output, unsigned x, unsigned y, Sharpener filter,
              float strength, bool hdr) {
     if (!g12.target || g12.failed || !output) return false;
-    ++g12.passes;
-    while (!g12.retired.empty() && g12.passes - g12.retired.front().first > kRetirePasses) g12.retired.pop_front();
 
     UINT first = (g12.nextPair++ % kDescriptorPairs) * 2;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = g12.heap->GetCPUDescriptorHandleForHeapStart();
@@ -445,9 +441,15 @@ bool Apply11(ID3D11DeviceContext* ctx, ID3D11Resource* output, unsigned x, unsig
     return true;
 }
 
-void Release() {
+void Release(bool d3d12) {
+    if (!d3d12) {
+        g11 = {};
+        return;
+    }
+    // Queued frames may still use the texture, descriptors and pipelines (see d3d::Retire).
+    auto old = std::make_shared<State12>(std::move(g12));
     g12 = {};
-    g11 = {};
+    d3d::Retire([old]() mutable { old.reset(); });
 }
 
 }  // namespace mhwdlss::sharpen

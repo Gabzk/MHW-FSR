@@ -39,10 +39,21 @@ def log_lines():
         return f.read().splitlines()
 
 
+def set_key(key, value):
+    """Sets key=value in the ini, keeping its line endings (the default ini has LF only)."""
+    raw = open(INI, "rb").read().decode("ascii")
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.split(eol)
+    hits = [i for i, l in enumerate(lines) if l.startswith(key + "=")]
+    if not hits:
+        sys.exit(f"{key}= not found in {INI}")
+    for i in hits:
+        lines[i] = f"{key}={value}"
+    open(INI, "wb").write(eol.join(lines).encode("ascii"))
+
+
 def set_mode(mode):
-    lines = open(INI, "rb").read().decode("ascii").split("\r\n")
-    lines = [f"Mode={mode}" if l.startswith("Mode=") else l for l in lines]
-    open(INI, "wb").write("\r\n".join(lines).encode("ascii"))
+    set_key("Mode", mode)
 
 
 def aa_state():
@@ -100,7 +111,8 @@ for c in range(cycles):
               f"driver errors {errs}, warnings {len(bad)}")
         for l in bad[:3]:
             print("    ", l[:200])
-        if not alive or errs or not evals:
+        # A switch the plugin never saw proves nothing, so a missing reload stops the run too.
+        if not alive or errs or not evals or not reload_ok:
             print("STOP")
             for l in new[-12:]:
                 print("    ", l[:200])
