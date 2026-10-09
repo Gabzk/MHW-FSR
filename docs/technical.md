@@ -9,7 +9,10 @@ its application id. The plugin is loaded later (with the input system) and:
 
 1. Replaces the entries of the game's internal NGX function table (in `.data`) and the game's
    NGX parameter object, so every DLSS 1 call ends up in the plugin. No game code is patched; the
-   TAA filter is hooked through two vtable entries.
+   TAA filter is hooked through two vtable entries. When a loader loads the plugin before the
+   game's renderer exists (SharpPluginLoader 2.0 preloads Stracker's Loader), the plugin also
+   answers the game's own NGX init, which looks the NGX functions up through the exe's
+   GetProcAddress import, so the game sets DLSS up through the plugin from the start.
 2. Shuts the game's NGX 1.x context down and initialises a current NGX with a project id and the
    folder of the chosen `nvngx_dlss.dll` as its only search path. With the game's application id,
    or with the old context still alive, the driver serves NVIDIA's per-game DLSS 1 model over the

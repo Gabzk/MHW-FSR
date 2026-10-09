@@ -113,6 +113,21 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
    the `NVSDK_NGX_D3D1x_*` exports' first `mov r64,[rip+x]`) and replaces its 7 entries, re-applying
    them every frame because the game's init rewrites them. The game's DLSS context (device +0x42700,
    `game::DlssContext`) gets the plugin's parameter object.
+   **Early load (0.8.1).** With Stracker's Loader alone, plugins load after the game's NGX init and
+   before its DLSS apply. SharpPluginLoader 2.0 (`winmm.dll` proxy, `loader-config.json` "SPL"
+   with PreloadDLLs `dinput8.dll`) preloads Stracker's Loader at sMhMain construction, so the
+   plugin loads before the renderer exists. The game's `NVSDK_NGX_D3D12_Init` export
+   (`0x14273f230`) zeroes the table (`0x1451d8808`..`0x1451d883f`), loads the NGX 1.x core and
+   fills the 7 entries through the exe's GetProcAddress import (slot `0x142e13118`), then calls the
+   Init it got. Left alone, the game set DLSS up with the 1.x core: type 2 (DLISP at 0.75, no DLSS
+   pass), so the plugin had nothing to upscale (grey screen). Calling `RecomputeRenderScale` after
+   a late adoption switched type 2 to 1 mid-run and crashed the render thread: a null texture in a
+   pass binding at `0x14229268b`. So when `game::Device()` is null at install, `HookNgxLookups`
+   swaps that import slot (found from the `FF 15` calls in the Init exports) and returns the
+   shim entries for `NVSDK_NGX_D3D1x_*` names. The game's NGX init then goes through the plugin,
+   the 1.x core is never initialised, and the context is created with the plugin's parameters. The
+   shim Init reports failure without an NVIDIA GPU. After a late adoption, the render scale is
+   only recomputed when the game already has a DLSS pass; otherwise the log says to toggle DLSS.
 2. **Current NGX.** The legacy context is shut down (otherwise the driver serves MHW's per-game OTA
    DLSS 1.2.110 model: zebra garbage, presets ignored) and NGX is initialised with a project id and
    the folder of the chosen `nvngx_dlss.dll` as its only search path.

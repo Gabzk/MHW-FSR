@@ -504,7 +504,11 @@ bool Init() {
     auto apiFlag = mem::FindPattern(*text, kApiFlagPattern);
     if (apiFlag.size() == 1) {
         g_apiFlag = mem::RipTarget(apiFlag[0] + 0x13, apiFlag[0] + 0x17);
-        LOGI("game: renderer API flag at +{:#x} (DX12 = {})", Rva(g_apiFlag), *g_apiFlag != 0);
+        // Set when the renderer starts, which may be after the plugin is loaded.
+        if (Device())
+            LOGI("game: renderer API flag at +{:#x} (DX12 = {})", Rva(g_apiFlag), *g_apiFlag != 0);
+        else
+            LOGI("game: renderer API flag at +{:#x} (renderer not started yet)", Rva(g_apiFlag));
     } else {
         LOGW("game: renderer API flag matched {} times", apiFlag.size());
     }
@@ -608,6 +612,11 @@ bool DlispActive() {
     auto scale = mem::SafeRead<float>(renderer + kRendererScaleApplied).value_or(1.0f);
     // Same test as the game's DLISP pass.
     return on && (bits & 2) && scale != 1.0f;
+}
+
+bool DlssOptionOn() {
+    uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
+    return renderer && mem::SafeRead<uint8_t>(renderer + kRendererDlssOn).value_or(0) != 0;
 }
 
 bool DlssEnabledInGame() {

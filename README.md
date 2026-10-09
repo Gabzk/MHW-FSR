@@ -4,8 +4,8 @@ A proper DLSS 4 port for Monster Hunter: World, implemented as a drag-and-drop S
 
 The game shipped with DLSS 1, which looks soft and smeary. This plugin runs current DLSS automatically: the version the NVIDIA driver has downloaded, or an `nvngx_dlss.dll` of your choice.
 
-![Before and after comparison: hunter's hair and weapon](images/1.png)
-![Before and after comparison: sign and character in Astera](images/2.png)
+![Before and after comparison: hunter's hair and weapon](images/1.jpeg)
+![Before and after comparison: sign and character in Astera](images/2.jpeg)
 
 *Zoomed-in crops, before and after installing MHW-DLSS4.*
 
@@ -20,7 +20,7 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 ## Requirements
 
 - An NVIDIA RTX GPU, plus either a current driver (it downloads DLSS for you) or an `nvngx_dlss.dll` 3.x or 4.x of your choice (see [Using a specific DLSS version](#using-a-specific-dlss-version)). 310.x (DLSS 4) is recommended.
-- [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982), or any loader that loads the DLLs in `nativePC\plugins`.
+- [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982), or any loader that loads the DLLs in `nativePC\plugins`. Works together with SharpPluginLoader 2.0 (version 0.8.1 and newer).
 
 ## Install
 
@@ -145,6 +145,8 @@ look there first.
 - **NVIDIA App DLSS override:** it works on top of this plugin, as in any other DLSS game.
 - **The game starts in DirectX 11 after a crash:** the game switches itself to DirectX 11 after a
   graphics crash. Turn DirectX 12 back on in the graphics options.
+- **Grey screen with SharpPluginLoader:** update to 0.8.1 or newer. If the log ever says to turn
+  NVIDIA DLSS off and on, do that in the graphics options.
 - **Shiny metal edges look blocky in Balanced or Performance:** that is the game's own shimmering
   highlights at the lower render resolution, which DLSS cannot fully smooth out. Quality or DLAA,
   or less sharpening, helps.

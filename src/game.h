@@ -70,7 +70,10 @@ bool RecomputeRenderScale();
 // setting is given back.
 void SetDlssUnavailable(bool unavailable);
 
+// NVIDIA DLSS is on in the graphics options and the renderer runs a DLSS pass (not DLISP alone).
 bool DlssEnabledInGame();
+// NVIDIA DLSS is on in the graphics options, whichever mode the game picked for it.
+bool DlssOptionOn();
 
 // The game will run its DLISP pass this frame (render scale below 1).
 bool DlispActive();

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -143,6 +144,8 @@ const wchar_t* g_dlssFolderPtr = nullptr;
 bool g_loggedModules = false;
 bool g_probeRequested = false;
 bool g_dumpOutputRequested = false;
+// The context was adopted after the game had set DLSS up through its NGX 1.x core (see OnUpdate).
+bool g_adoptedLate = false;
 
 ApiState& State(Api api) { return g_api[api == Api::D3D12 ? 1 : 0]; }
 
@@ -855,11 +858,17 @@ NVSDK_NGX_Result ShimRelease(Api api, NVSDK_NGX_Handle* handle) {
     return NVSDK_NGX_Result_Success;
 }
 
+bool IsNvidiaGpu();
+
 template <Api A>
 struct Entry {
-    // Only reached if the game re-initialises NGX; the plugin initialises its own NGX lazily.
+    // Reached when the game initialises NGX through the plugin's entries (see HookNgxLookups) or
+    // re-initialises it. The plugin initialises its own NGX lazily; without an NVIDIA GPU the game
+    // is told NGX failed, as the NGX 1.x core would.
     static NVSDK_NGX_Result NVSDK_CONV Init(unsigned long long, const wchar_t*, void*, NVSDK_NGX_Version) {
-        return NVSDK_NGX_Result_Success;
+        static const bool nvidia = IsNvidiaGpu();
+        if (!nvidia) LOGI("game initialised NGX {}: no NVIDIA GPU, DLSS stays off", ApiName(A));
+        return nvidia ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_FAIL_PlatformError;
     }
     static NVSDK_NGX_Result NVSDK_CONV Shutdown() { return ShimShutdown(A); }
     static NVSDK_NGX_Result NVSDK_CONV Scratch(NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, size_t* size) {
@@ -961,6 +970,70 @@ bool IsNvidiaGpu() {
     return false;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Loaders that load plugins early (SharpPluginLoader preloads Stracker's Loader) put the plugin in
+// place before the game's renderer and its NGX 1.x init. That init clears the function table,
+// loads the driver's NGX 1.x core and fills the table through the exe's GetProcAddress import.
+// Left alone, the game then sets DLSS up with the NGX 1.x core: DLSS 1's upscaler alone (DLISP at
+// 0.75) with no DLSS pass the plugin could feed, so nothing wrote the frame (a grey screen), and
+// switching the game to a DLSS pass afterwards crashed its render thread. So when the renderer does
+// not exist yet, those lookups get the plugin's entries, and the game sets DLSS up through the
+// plugin from the start, as when the plugin is loaded after that init.
+
+using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+GetProcAddressFn g_realGetProcAddress = nullptr;
+
+FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
+    FARPROC real = g_realGetProcAddress(module, name);
+    if (!real || IS_INTRESOURCE(name) || std::strncmp(name, "NVSDK_NGX_D3D1", 14) != 0) return real;
+    // Same order as Table.
+    static constexpr const char* kEntries[] = {"Init",          "Shutdown",        "GetScratchBufferSize",
+                                               "GetParameters", "CreateFeature",   "EvaluateFeature",
+                                               "ReleaseFeature"};
+    for (Api api : {Api::D3D11, Api::D3D12}) {
+        std::string prefix = std::string("NVSDK_NGX_") + ApiName(api) + "_";
+        if (std::strncmp(name, prefix.c_str(), prefix.size()) != 0) continue;
+        const void* const* shim = reinterpret_cast<const void* const*>(&State(api).shim);
+        for (int i = 0; i < 7; ++i) {
+            if (std::strcmp(name + prefix.size(), kEntries[i]) != 0) continue;
+            if (i == 0) LOGI("game initialises NGX {} through the plugin's entries", ApiName(api));
+            return reinterpret_cast<FARPROC>(const_cast<void*>(shim[i]));
+        }
+    }
+    return real;
+}
+
+// The exe's import slot for GetProcAddress, taken from the calls in the NGX init exports.
+void** FindGetProcAddressSlot(HMODULE exe) {
+    void* real[3] = {reinterpret_cast<void*>(&GetProcAddress), nullptr, nullptr};
+    if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll")) real[1] = reinterpret_cast<void*>(GetProcAddress(k32, "GetProcAddress"));
+    if (HMODULE kb = GetModuleHandleW(L"kernelbase.dll")) real[2] = reinterpret_cast<void*>(GetProcAddress(kb, "GetProcAddress"));
+    for (const char* exportName : {"NVSDK_NGX_D3D12_Init", "NVSDK_NGX_D3D11_Init"}) {
+        auto* code = reinterpret_cast<uint8_t*>(GetProcAddress(exe, exportName));
+        if (!code) continue;
+        for (int i = 0; i < 0x200; ++i) {
+            if (code[i] != 0xff || code[i + 1] != 0x15) continue;  // call [rip+disp32]
+            auto** slot = reinterpret_cast<void**>(mem::RipTarget(code + i + 2, code + i + 6));
+            void* value = mem::SafeRead<void*>(slot).value_or(nullptr);
+            if (value && (value == real[0] || value == real[1] || value == real[2])) return slot;
+        }
+    }
+    return nullptr;
+}
+
+void HookNgxLookups(HMODULE exe) {
+    void** slot = FindGetProcAddressSlot(exe);
+    if (!slot) {
+        LOGW("loaded before the game's renderer, but the GetProcAddress import of its NGX init was not found; "
+             "DLSS may need to be turned off and on in the graphics options");
+        return;
+    }
+    g_realGetProcAddress = reinterpret_cast<GetProcAddressFn>(*slot);
+    mem::WritePointer(slot, reinterpret_cast<void*>(&HookGetProcAddress));
+    LOGI("loaded before the game's renderer: its NGX init will get the plugin's entries (import slot +{:#x})",
+         reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(exe));
+}
+
 // Makes the game's DLSS context use our parameter object, adopting features the legacy core
 // created before the plugin was loaded. Builds the context when the game skipped it because the
 // legacy core refused DLSS (e.g. a current nvngx_dlss.dll in the game folder). `mayUseDxgi` is
@@ -983,6 +1056,7 @@ void AdoptContext(bool mayUseDxgi) {
         if (g_legacyParams) g_legacyParams->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &legacyDlss);
         LOGI("DLSS context adopted (game's NGX 1.x reported DLSS available {}; existing DLSS {}, DLISP {})",
              legacyDlss, ctx->dlssHandle, ctx->dlispHandle);
+        g_adoptedLate = mayUseDxgi;  // after Install, which refreshes the render scale itself
         return;
     }
     if (g_contextCreated || g_fallbackChecked) return;
@@ -1042,47 +1116,72 @@ void OnFrame() {
     }
 }
 
+void ReloadSettings(bool& recompute);
+
 // Once per frame on the game's main thread, where the game applies graphics options itself.
 void OnUpdate() {
     bool recompute = false;
     {
         std::lock_guard lock(g_mutex);
+        // Also here and not only at TAA pass builds: those stop while the game's TAA is off.
+        PatchTable(g_api[0], Api::D3D11, false);
+        PatchTable(g_api[1], Api::D3D12, false);
+        AdoptContext(true);
         d3d::RetireTick(game::Frame());
-        static unsigned updates = 0;
-        if (++updates % 30 != 0) return;
-        if (ReloadConfigIfChanged()) {
-            game::ApplyConfig(g_config);
-            LogSetLevel(g_config.logLevel);
-            LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
-                 "exposure {}, bypass {}",
-                 QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
-                 g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
-                 g_config.bypass);
-            for (auto& f : g_features) {
-                f->dlss.failed = false;  // allow a retry with the new settings
-                f->evaluations = 0;      // log the next evaluations in detail again
-                f->resetNext = true;     // start from an empty history
+        // The game set DLSS up through the NGX 1.x core before the context was adopted (normally
+        // prevented by HookNgxLookups). With a DLSS pass, asking again is a Mode switch. Without one
+        // (DLSS 1's upscaler alone) switching at run time crashed the game's render thread, so
+        // that is left to the game's own options.
+        if (g_adoptedLate) {
+            g_adoptedLate = false;
+            if (game::DlssEnabledInGame()) {
+                LOGI("the game set DLSS up before the plugin took over; asking it for the render scale again");
+                recompute = true;
+            } else if (game::DlssOptionOn()) {
+                LOGW("the game set DLSS up with DLSS 1's upscaler before the plugin took over; turn NVIDIA DLSS "
+                     "off and on in the graphics options");
             }
-            g_probeRequested = g_config.debugProbe;
-            g_dumpOutputRequested = g_config.debugDumpOutput;
-            if (g_config.debugDumpFrames > 0)
-                probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
-                                        static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
-            recompute = game::DlssEnabledInGame();
         }
-        ReloadGameOptionsIfChanged();
-        static float lastSharpness = -1.0f;
-        static Sharpener lastSharpener = Sharpener::NVSharpen;
-        if (g_config.Sharpness() != lastSharpness || g_config.sharpener != lastSharpener) {
-            lastSharpness = g_config.Sharpness();
-            lastSharpener = g_config.sharpener;
-            LOGI("sharpening {:.2f} with {} (from {})", lastSharpness, SharpenerName(lastSharpener),
-                 g_config.sharpness < 0.0f ? "the game's DLSS Sharpness option" : "the ini");
-        }
+        static unsigned updates = 0;
+        if (++updates % 30 == 0) ReloadSettings(recompute);
     }
     // Outside the lock: the game's recompute releases and creates its DLSS features through the
     // shim and may wait for the render thread, which takes the lock to evaluate.
     if (recompute && game::RecomputeRenderScale()) LOGI("render scale refreshed");
+}
+
+// Every 30 updates: the ini and graphics_option.ini. Sets `recompute` when the render scale may
+// have changed.
+void ReloadSettings(bool& recompute) {
+    if (ReloadConfigIfChanged()) {
+        game::ApplyConfig(g_config);
+        LogSetLevel(g_config.logLevel);
+        LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
+             "exposure {}, bypass {}",
+             QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
+             g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
+             g_config.bypass);
+        for (auto& f : g_features) {
+            f->dlss.failed = false;  // allow a retry with the new settings
+            f->evaluations = 0;      // log the next evaluations in detail again
+            f->resetNext = true;     // start from an empty history
+        }
+        g_probeRequested = g_config.debugProbe;
+        g_dumpOutputRequested = g_config.debugDumpOutput;
+        if (g_config.debugDumpFrames > 0)
+            probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
+                                    static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
+        if (game::DlssOptionOn()) recompute = true;
+    }
+    ReloadGameOptionsIfChanged();
+    static float lastSharpness = -1.0f;
+    static Sharpener lastSharpener = Sharpener::NVSharpen;
+    if (g_config.Sharpness() != lastSharpness || g_config.sharpener != lastSharpener) {
+        lastSharpness = g_config.Sharpness();
+        lastSharpener = g_config.sharpener;
+        LOGI("sharpening {:.2f} with {} (from {})", lastSharpness, SharpenerName(lastSharpener),
+             g_config.sharpness < 0.0f ? "the game's DLSS Sharpness option" : "the ini");
+    }
 }
 
 bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
@@ -1107,6 +1206,7 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     PatchTable(g_api[1], Api::D3D12, true);
 
     AdoptContext(false);
+    if (!game::Device()) HookNgxLookups(exe);
     game::SetFrameCallback(&OnFrame);
     game::SetUpdateCallback(&OnUpdate);
     LOGI("renderer at install: {}", game::DescribeState());
