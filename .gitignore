@@ -1,0 +1,24 @@
+# Build output and packages
+/build/
+/dist/
+/.cache/
+__pycache__/
+*.pyc
+
+# Local only: never commit these
+# - game executables (copyrighted) used for reverse engineering
+/re/
+# - other mods and loaders kept for reference
+/MHW-QuestLoader/
+/MHWSS-v1.0.2-Release/
+/Performance Booster and Plugin Extender/
+/SharpPluginLoader/
+/Stracker's Loader Binary/
+# - raw screenshots and image editor projects (exported comparisons live in images/)
+/graphics/
+# - NVIDIA binaries
+/nvngx_dlss.dll
+*.dll
+# - NVIDIA DLSS SDK: its licence does not allow redistributing it; see third_party/dlss_sdk/README.md
+/third_party/dlss_sdk/*
+!/third_party/dlss_sdk/README.md
