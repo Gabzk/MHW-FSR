@@ -340,9 +340,9 @@ bool InitModern(Api api, void* device) {
 
     NVSDK_NGX_Result r =
         api == Api::D3D12
-            ? NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHWDLSS_VERSION,
+            ? NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHW_DLSS4_VERSION,
                                                   g_dataDir.c_str(), static_cast<ID3D12Device*>(device), &info)
-            : NVSDK_NGX_D3D11_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHWDLSS_VERSION,
+            : NVSDK_NGX_D3D11_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHW_DLSS4_VERSION,
                                                   g_dataDir.c_str(), static_cast<ID3D11Device*>(device), &info);
     if (NVSDK_NGX_FAILED(r)) {
         LOGE("NGX {} init failed ({:#x})", ApiName(api), static_cast<unsigned>(r));

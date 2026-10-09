@@ -288,7 +288,7 @@ ID3D12Resource* Target12(ID3D12Device* device, unsigned width, unsigned height, 
         g12.target.Reset();
         return nullptr;
     }
-    g12.target->SetName(L"MHWDLSS sharpen input");
+    g12.target->SetName(L"MHW-DLSS4 sharpen input");
     g12.width = width;
     g12.height = height;
     g12.format = format;

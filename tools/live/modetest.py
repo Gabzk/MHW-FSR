@@ -14,8 +14,8 @@ import sys
 import time
 
 GAME = r"F:\SteamLibrary\steamapps\common\Monster Hunter World"
-INI = GAME + r"\nativePC\plugins\MHWDLSS.ini"
-LOG = GAME + r"\nativePC\plugins\MHWDLSS.log"
+INI = GAME + r"\nativePC\plugins\MHW-DLSS4.ini"
+LOG = GAME + r"\nativePC\plugins\MHW-DLSS4.log"
 cycles = int(sys.argv[1])
 MODES = ["Performance", "Quality", "DLAA", "Balanced", "Performance", "DLAA"]
 
@@ -93,7 +93,7 @@ if pid() is None and "--no-launch" not in sys.argv:
 print(f"game pid {pid()}, driver errors so far {base_errors}")
 print("AA:", aa_state())
 for l in log_lines():
-    if "anti-aliasing" in l or "MHWDLSS 0." in l:
+    if "anti-aliasing" in l or "MHW-DLSS4 0." in l:
         print("  ", l[:200])
 
 for c in range(cycles):

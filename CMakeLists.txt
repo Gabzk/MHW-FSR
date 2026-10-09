@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MHWDLSS VERSION 0.7.3 LANGUAGES CXX)
+project(MHW-DLSS4 VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,7 +41,7 @@ foreach(SHADER vanilla_sharpen rcas)
     VERBATIM)
 endforeach()
 
-add_library(MHWDLSS SHARED
+add_library(MHW-DLSS4 SHARED
   src/dllmain.cpp
   src/config.cpp
   src/crash.cpp
@@ -61,13 +61,13 @@ add_library(MHWDLSS SHARED
   "${SHADER_DIR}/rcas_cs.h"
 )
 
-target_include_directories(MHWDLSS PRIVATE src "${DLSS_SDK_DIR}/include" "${NIS_DIR}" "${SHADER_DIR}")
-target_compile_definitions(MHWDLSS PRIVATE
+target_include_directories(MHW-DLSS4 PRIVATE src "${DLSS_SDK_DIR}/include" "${NIS_DIR}" "${SHADER_DIR}")
+target_compile_definitions(MHW-DLSS4 PRIVATE
   WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS
-  MHWDLSS_VERSION="${PROJECT_VERSION}")
-target_compile_options(MHWDLSS PRIVATE /W4 /permissive- /utf-8 /EHsc /Zi)
-target_link_options(MHWDLSS PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+  MHW_DLSS4_VERSION="${PROJECT_VERSION}")
+target_compile_options(MHW-DLSS4 PRIVATE /W4 /permissive- /utf-8 /EHsc /Zi)
+target_link_options(MHW-DLSS4 PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 
-target_link_libraries(MHWDLSS PRIVATE
+target_link_libraries(MHW-DLSS4 PRIVATE
   "${DLSS_SDK_DIR}/lib/$<IF:$<CONFIG:Debug>,nvsdk_ngx_s_dbg.lib,nvsdk_ngx_s.lib>"
   version)

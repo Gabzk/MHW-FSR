@@ -28,7 +28,7 @@ void Start(HMODULE module) {
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     fs::path exe(buf);
     LoadGameOptions((exe.parent_path() / L"graphics_option.ini").wstring());
-    LOGI("MHWDLSS {} loaded from {}", MHWDLSS_VERSION, Narrow(dll));
+    LOGI("MHW-DLSS4 {} loaded from {}", MHW_DLSS4_VERSION, Narrow(dll));
     LOGI("game: {}", Narrow(exe));
     LOGI("config: mode {} (render scale {:.3f}), preset {}, sharpness {:.2f}{} with {}, depth inverted {}, MV scale {},{}, "
          "jitter scale {},{}",
@@ -36,6 +36,14 @@ void Start(HMODULE module) {
          g_config.preset ? static_cast<char>('A' + g_config.preset - 1) : '-', g_config.Sharpness(),
          g_config.sharpness < 0.0f ? " (game option)" : "", SharpenerName(g_config.sharpener), g_config.depthInverted, g_config.mvScaleX,
          g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY);
+
+    std::error_code ec;
+    // Up to 0.7.3 the plugin was MHWDLSS.dll. With both in the folder only the one the loader loads
+    // first hooks the game: the other no longer finds the TAA filter's vtable entry.
+    if (_wcsicmp(dll.filename().c_str(), L"MHWDLSS.dll") != 0 && fs::exists(dir / L"MHWDLSS.dll", ec))
+        LOGW("an older version (MHWDLSS.dll) is also installed: delete MHWDLSS.dll, MHWDLSS.ini, MHWDLSS.log and "
+             "the MHWDLSS folder from {} (move a nvngx_dlss.dll of your own from there to {} first)",
+             Narrow(dir), Narrow(dir / stem));
 
     if (!g_config.enabled) {
         LOGI("disabled in the ini");
@@ -46,7 +54,6 @@ void Start(HMODULE module) {
     // Folder for NGX's files and the DLSS DLLs the plugin uses (see dlss_dll.h). It sits beside the
     // plugin instead of in nativePC\plugins itself because the loader would load every DLL found there.
     fs::path dataDir = dir / stem;
-    std::error_code ec;
     fs::create_directories(dataDir, ec);
 
     if (!game::Init()) {

@@ -13,7 +13,7 @@ Config g_config;
 namespace {
 
 constexpr wchar_t kDefaultIni[] =
-    L"; MHWDLSS - DLSS 4 for Monster Hunter: World\n"
+    L"; MHW-DLSS4 - DLSS 4 for Monster Hunter: World\n"
     L"; Turn on \"NVIDIA DLSS\" in the game's graphics options; this plugin replaces what it runs.\n"
     L"; The file is re-read while the game runs.\n"
     L"\n"
@@ -46,11 +46,11 @@ constexpr wchar_t kDefaultIni[] =
     L";              NVSharpen up to 0.5, stronger above.\n"
     L"Sharpener=NVSharpen\n"
     L"; Which nvngx_dlss.dll to use. Empty: the newest DLSS the NVIDIA driver has downloaded, or\n"
-    L"; nvngx_dlss.dll in the MHWDLSS folder next to this file when that one is newer.\n"
+    L"; nvngx_dlss.dll in the MHW-DLSS4 folder next to this file when that one is newer.\n"
     L"; Otherwise a folder holding nvngx_dlss.dll, or the DLL file itself under any name. Relative\n"
     L"; paths start at the game folder (the one with MonsterHunterWorld.exe). Examples:\n"
-    L";   DLLPath=nativePC\\plugins\\MHWDLSS\n"
-    L";   DLLPath=nativePC\\plugins\\MHWDLSS\\nvngx_dlss_310.4.dll\n"
+    L";   DLLPath=nativePC\\plugins\\MHW-DLSS4\n"
+    L";   DLLPath=nativePC\\plugins\\MHW-DLSS4\\nvngx_dlss_310.4.dll\n"
     L";   DLLPath=..\\Cyberpunk 2077\\bin\\x64\n"
     L";   DLLPath=D:\\DLSS\\310.9\\nvngx_dlss.dll\n"
     L"; Read when the game starts.\n"
@@ -70,7 +70,7 @@ constexpr wchar_t kDefaultIni[] =
     L"ForceJitter=1\n"
     L"; The game only jitters across half a pixel; widen it to a full pixel while DLSS runs.\n"
     L"FullPixelJitter=1\n"
-    L"; Write NGX's own log lines into MHWDLSS.log.\n"
+    L"; Write NGX's own log lines into MHW-DLSS4.log.\n"
     L"NGXLogging=0\n"
     L"; DLAA mode only: show the game's TAA instead of DLSS, for comparisons.\n"
     L"Bypass=0\n";

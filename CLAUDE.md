@@ -1,9 +1,17 @@
-# MHWDLSS: notes for working on this project
+# MHW-DLSS4: notes for working on this project
 
 DLSS 4 for Monster Hunter: World (Iceborne, game version 15.2x, tested on 15.23), as a native
 plugin DLL loaded by Stracker's Loader from `nativePC\plugins`. C++20, MSVC, CMake + Ninja.
-Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.7.3 at the time of writing).
-Releases are git tags (`v0.7.3`); the repo is private on GitHub (`odt1/MHWDLSS`).
+Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.8.0 at the time of writing).
+Releases are git tags (`v0.8.0`); the repo is private on GitHub (`odt1/MHW-DLSS4`).
+
+Called MHWDLSS (`MHWDLSS.dll/.ini/.log`, `MHWDLSS\` folder, repo `odt1/MHWDLSS`) up to 0.7.3;
+renamed to MHW-DLSS4 in 0.8.0. The ini, log and data folder names follow the DLL's file name.
+Kept on purpose: the C++ namespace `mhwdlss`, the NGX project id, and the local checkout folder
+`C:\Projects\MHW DLSS` (Claude's project memory is keyed to that path). If both DLLs are installed,
+the first one the loader loads (`MHW-DLSS4.dll` sorts first) hooks the game, the other one fails
+`game::Init` ("TAA vtable not found") and stays inactive, and MHW-DLSS4 logs a warning to delete
+the old files.
 
 `README.md` is for players and belongs to the user, who rewrote its top part themselves. Keep it
 plain and non-technical, and don't restructure it without being asked. Developer detail goes here
@@ -19,11 +27,11 @@ src/                  the plugin
   ngx_shim.cpp/.h     replaces the game's NGX 1.x function table; runs current DLSS (TAA and DLISP
                       positions), feature lifetime, optimal-settings callback, ini hot reload
   ngx_params.cpp/.h   the NVSDK_NGX_Parameter object handed to the game
-  dlss_dll.cpp/.h     which nvngx_dlss.dll to use (driver store / DLLPath / MHWDLSS folder)
+  dlss_dll.cpp/.h     which nvngx_dlss.dll to use (driver store / DLLPath / MHW-DLSS4 folder)
   sharpen.cpp/.h      NVSharpen / Vanilla / RCAS compute passes after DLSS (D3D11 + D3D12)
   d3d_util.cpp/.h     texture info, mirror copies, rect copies, D3D12 retire queue, debug dumps
   probe.cpp/.h        DebugProbe / DebugDumpFrames (D3D12 only)
-  config.cpp/.h       MHWDLSS.ini (default text = kDefaultIni) and graphics_option.ini reading
+  config.cpp/.h       MHW-DLSS4.ini (default text = kDefaultIni) and graphics_option.ini reading
   crash.cpp, log.cpp, memory.cpp (pattern scan, SafeRead, WritePointer)
   shaders/            nis_sharpen.hlsl, vanilla_sharpen.hlsl, rcas.hlsl (fxc at build time)
 third_party/          NIS SDK v1.0.3 (MIT), AMD FSR licence, DLSS SDK (not committed, see its README)
@@ -45,9 +53,9 @@ Machine-specific setup is in the user's global CLAUDE.md (pwsh, `devshell` for M
 ```
 pwsh:  . $PROFILE; devshell; cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 pwsh:  . $PROFILE; devshell; cmake --build build
-tools\deploy.ps1       copies build\MHWDLSS.dll + .pdb into the game (game must be closed)
-tools\package.ps1      dist\MHWDLSS-<version>.zip: DLL, default ini (extracted from kDefaultIni in
-                       config.cpp), README as MHWDLSS-README.md, THIRD-PARTY notices
+tools\deploy.ps1       copies build\MHW-DLSS4.dll + .pdb into the game (game must be closed)
+tools\package.ps1      dist\MHW-DLSS4-<version>.zip: DLL, default ini (extracted from kDefaultIni in
+                       config.cpp), README as MHW-DLSS4-README.md, THIRD-PARTY notices
 ```
 
 Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dlss.dll` unless
@@ -60,8 +68,8 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
   `steam://rungameid/582010`. The exe is SteamStub-packed; the unpacked copy for RE is
   `re\MonsterHunterWorld.exe.unpacked.exe` (Steamless at `C:\Applications\Steamless 0.5`). Image base
   0x140000000 (no ASLR), so exe addresses below are absolute VAs; the plugin logs RVAs (+0x...).
-- Plugin files in `nativePC\plugins`: `MHWDLSS.dll`, `MHWDLSS.ini` (hot-reloaded, checked every 30
-  frames by mtime from the TAA update), `MHWDLSS.log`, and the `MHWDLSS\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
+- Plugin files in `nativePC\plugins`: `MHW-DLSS4.dll`, `MHW-DLSS4.ini` (hot-reloaded, checked every 30
+  frames by mtime from the TAA update), `MHW-DLSS4.log`, and the `MHW-DLSS4\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
   `custom\`). Never put a DLL directly in `nativePC\plugins`: the loader loads every DLL there.
 - The user also runs `MonsterHunterFixorld.dll` (their own swapchain/frame-latency/loading plugin;
   its log shows fps, hitches and `ResizeBuffers` with the swapchain format), `!CRCBypass.dll`,
@@ -71,14 +79,14 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
   then ignores it and starts with defaults: DX11, 1080p). Edit it as ASCII and restore it byte for
   byte after tests. After a GPU crash the game writes `DirectX12Enable=Off` itself; tell the user.
 - Test runs: launch via Steam, wait for `evaluate #512 ok` in the log (title screen is enough for
-  most checks; getting into the hub needs the user), change keys in `MHWDLSS.ini` (ASCII), and end the
+  most checks; getting into the hub needs the user), change keys in `MHW-DLSS4.ini` (ASCII), and end the
   run with `Stop-Process -Name MonsterHunterWorld -Force`. Never CloseMainWindow (it shows a dialog
   only the user can answer). Killing a game the user started is fine during active work.
-- After a test session, overwrite the user's `MHWDLSS.ini` with the packaged default ini of the new
+- After a test session, overwrite the user's `MHW-DLSS4.ini` with the packaged default ini of the new
   version (the user's explicit preference), not with their old one.
 - Captures: `tools\capture-window.ps1 -Path x.png` (PrintWindow, no focus steal; works in DX12 and
   now also DX11 windows, but sometimes returns all-black frames; retry). `DebugDumpOutput=1` writes
-  the DLSS output to `MHWDLSS\output.bin` (D3D11 only; `tools\bin2png.py`). `DebugDumpFrames=N`
+  the DLSS output to `MHW-DLSS4\output.bin` (D3D11 only; `tools\bin2png.py`). `DebugDumpFrames=N`
   dumps TAA-position colour/motion/depth/jitter (D3D12 only; `tools/motion_check.py`).
 - GPU faults: check the System log for `nvlddmkm` event 153 (they come in threes) and the game's
   `ERR12 : Graphics device crashed.` handler. `tools/live/modetest.py <cycles>` launches the game if
@@ -230,7 +238,7 @@ DLSS 1 call sets "MV.Scale.X/Y" = 1.0. Fatal GPU handler: `0x1423a9cf0` -> GetDe
 Driver DLSS store: `%ProgramData%\NVIDIA\NGX\models\dlss\versions\<(maj<<16)|(min<<8)|patch>\files\
 <id>.bin`; MHW's own OTA entries are app B9D2F5C (DLSS 1.2.110), the NVIDIA App override build is
 app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the newest >= 3 to
-`MHWDLSS\driver\nvngx_dlss.dll`.
+`MHW-DLSS4\driver\nvngx_dlss.dll`.
 
 ## Tools
 

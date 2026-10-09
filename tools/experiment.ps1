@@ -5,7 +5,7 @@ param(
     [string[]]$Order,
     [double]$Settle = 4,
     [int]$Count = 6,
-    [string]$OutDir = (Join-Path $env:TEMP 'mhwdlss\exp'),
+    [string]$OutDir = (Join-Path $env:TEMP 'mhw-dlss4\exp'),
     # name = x,y,w,h in window pixels
     [hashtable]$Regions = @{ bark = @(200, 500, 300, 300); rock = @(1940, 580, 200, 200) }
 )

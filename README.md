@@ -1,4 +1,4 @@
-# MHWDLSS
+# MHW-DLSS4
 
 A proper DLSS 4 port for Monster Hunter: World, implemented as a drag-and-drop Stracker's Loader plugin.
 
@@ -7,7 +7,7 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 ![Before and after comparison: hunter's hair and weapon](images/1.png)
 ![Before and after comparison: sign and character in Astera](images/2.png)
 
-*Zoomed-in crops, before and after installing MHWDLSS.*
+*Zoomed-in crops, before and after installing MHW-DLSS4.*
 
 ## Features
 
@@ -26,18 +26,25 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 
 1. Extract the zip into the game folder. You get:
    ```
-   nativePC\plugins\MHWDLSS.dll
-   nativePC\plugins\MHWDLSS.ini
+   nativePC\plugins\MHW-DLSS4.dll
+   nativePC\plugins\MHW-DLSS4.ini
    ```
-   The plugin keeps its other files in `nativePC\plugins\MHWDLSS\`. It copies the NVIDIA driver's DLSS file to `MHWDLSS\driver\nvngx_dlss.dll` automatically, and again whenever the driver gets a newer one. Never put an `nvngx_dlss.dll` directly in `nativePC\plugins`: Stracker's Loader loads every DLL there. Leave the game's own `nvngx_dlss.dll` in the game folder alone; it is no longer used, but it does no harm.
+   The plugin keeps its other files in `nativePC\plugins\MHW-DLSS4\`. It copies the NVIDIA driver's DLSS file to `MHW-DLSS4\driver\nvngx_dlss.dll` automatically, and again whenever the driver gets a newer one. Never put an `nvngx_dlss.dll` directly in `nativePC\plugins`: Stracker's Loader loads every DLL there. Leave the game's own `nvngx_dlss.dll` in the game folder alone; it is no longer used, but it does no harm.
 2. Start the game, set **NVIDIA DLSS** to **On** in the graphics options, and keep **Image Quality** on **High**. **Anti-Aliasing** is greyed out while DLSS is on; whatever it shows, the plugin uses the game's TAA together with DLSS and keeps FXAA off.
 
-To uninstall, delete `MHWDLSS.dll`, `MHWDLSS.ini`, `MHWDLSS.log` and the `MHWDLSS` folder in
+To uninstall, delete `MHW-DLSS4.dll`, `MHW-DLSS4.ini`, `MHW-DLSS4.log` and the `MHW-DLSS4` folder in
 `nativePC\plugins`.
+
+**Upgrading from MHWDLSS (0.7.x and older):** the plugin was renamed. Delete the old
+`MHWDLSS.dll`, `MHWDLSS.ini` and `MHWDLSS.log` from `nativePC\plugins`. If you put an
+`nvngx_dlss.dll` of your own into the `MHWDLSS` folder, move it to `MHW-DLSS4`, then delete the
+`MHWDLSS` folder. Copy any settings you changed from the old ini into `MHW-DLSS4.ini`, and if
+`DLLPath` points into the old folder, change it to the new one. While the old DLL is still there,
+only one of the two works, and `MHW-DLSS4.log` reminds you to remove the old files.
 
 ## Settings
 
-You can edit `nativePC\plugins\MHWDLSS.ini` while the game runs; changes apply within a second (except `DLLPath`).
+You can edit `nativePC\plugins\MHW-DLSS4.ini` while the game runs; changes apply within a second (except `DLLPath`).
 
 | Key | Values | Meaning |
 | --- | --- | --- |
@@ -49,7 +56,7 @@ You can edit `nativePC\plugins\MHWDLSS.ini` while the game runs; changes apply w
 | `DLLPath` | folder or file | The `nvngx_dlss.dll` to use. Empty (default): the one the driver has. See [Using a specific DLSS version](#using-a-specific-dlss-version). Read when the game starts. |
 | `AutoExposure` | 0 / 1 | Let DLSS estimate exposure (presets L and M always do). |
 | `Bypass` | 0 / 1 | DLAA mode only: show the game's TAA for comparison. |
-| `LogLevel` | `Debug`, `Info`, `Warn`, `Error` | How much goes into `MHWDLSS.log` next to the plugin. |
+| `LogLevel` | `Debug`, `Info`, `Warn`, `Error` | How much goes into `MHW-DLSS4.log` next to the plugin. |
 
 The `[Advanced]` keys describe how the game's motion vectors, depth and camera jitter work. They
 were measured for this game and should not need changing.
@@ -94,9 +101,9 @@ started sharpening above 1, and the slider stops at 1.
 By default the plugin uses the newest DLSS your NVIDIA driver has downloaded. To use a particular
 `nvngx_dlss.dll` instead, for example an older version you prefer or one from another game:
 
-- **Easiest:** put the DLL into `nativePC\plugins\MHWDLSS`. The plugin uses it when it is newer
+- **Easiest:** put the DLL into `nativePC\plugins\MHW-DLSS4`. The plugin uses it when it is newer
   than the driver's.
-- **Any version, newer or older:** set `DLLPath` in `MHWDLSS.ini` and restart the game. `DLLPath`
+- **Any version, newer or older:** set `DLLPath` in `MHW-DLSS4.ini` and restart the game. `DLLPath`
   can be a folder that contains `nvngx_dlss.dll`, or the DLL file itself under any name (handy for
   keeping several versions side by side).
 
@@ -105,11 +112,11 @@ A path without a drive letter starts in the game folder, the one with `MonsterHu
 folder up, which reaches your other games in the same Steam library. Examples:
 
 ```ini
-; nvngx_dlss.dll in nativePC\plugins\MHWDLSS, even when the driver has a newer one
-DLLPath=nativePC\plugins\MHWDLSS
+; nvngx_dlss.dll in nativePC\plugins\MHW-DLSS4, even when the driver has a newer one
+DLLPath=nativePC\plugins\MHW-DLSS4
 
 ; a renamed copy in the same folder
-DLLPath=nativePC\plugins\MHWDLSS\nvngx_dlss_310.4.dll
+DLLPath=nativePC\plugins\MHW-DLSS4\nvngx_dlss_310.4.dll
 
 ; the DLSS of another game in the same Steam library
 DLLPath=..\Cyberpunk 2077\bin\x64
@@ -123,14 +130,14 @@ there. If the path is wrong, the log says so and the plugin falls back to the dr
 
 ## Troubleshooting
 
-The plugin writes everything it does to `nativePC\plugins\MHWDLSS.log`. When something seems off,
+The plugin writes everything it does to `nativePC\plugins\MHW-DLSS4.log`. When something seems off,
 look there first.
 
 - **The NVIDIA DLSS option is greyed out or missing:** the log says why. Usually the GPU is not an
   RTX card, or the driver is too old.
 - **The log says "no nvngx_dlss.dll" or "DLSS is not available":** the driver has not downloaded
   DLSS 3 or newer yet, and no other `nvngx_dlss.dll` was found. Put one (3.x or 4.x) into
-  `nativePC\plugins\MHWDLSS`, or point `DLLPath` at one. DLSS 1 files do not work.
+  `nativePC\plugins\MHW-DLSS4`, or point `DLLPath` at one. DLSS 1 files do not work.
 - **Which DLSS version is running?** The log line starting with `nvngx_dlss.dll:` shows the version
   and where it came from. You can also turn on NVIDIA's on-screen DLSS indicator: set the registry
   value `HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore\ShowDlssIndicator` (DWORD) to `1024`, and

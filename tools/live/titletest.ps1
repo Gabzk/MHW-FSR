@@ -3,7 +3,7 @@
 # device loss. Prints relevant log lines.
 param([int]$Cycles = 15)
 $g = 'F:\SteamLibrary\steamapps\common\Monster Hunter World\nativePC\plugins'
-$L = "$g\MHWDLSS.log"
+$L = "$g\MHW-DLSS4.log"
 $try = Join-Path $PSScriptRoot '..\try.ps1'
 function Alive { [bool](Get-Process MonsterHunterWorld -ErrorAction SilentlyContinue) }
 function LogFrom([int]$n) { (Get-Content $L | Select-Object -Skip $n) }

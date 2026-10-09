@@ -6,8 +6,8 @@ param(
     [string]$Prefix = 'mm',
     [int]$Frames = 4, [double]$Settle = 2.5, [double]$Interval = 0.3,
     [int]$X = 1060, [int]$Y = 600, [int]$W = 360, [int]$H = 640,
-    [string]$Ini = 'F:\SteamLibrary\steamapps\common\Monster Hunter World\nativePC\plugins\MHWDLSS.ini',
-    [string]$OutDir = (Join-Path $env:TEMP 'mhwdlss')
+    [string]$Ini = 'F:\SteamLibrary\steamapps\common\Monster Hunter World\nativePC\plugins\MHW-DLSS4.ini',
+    [string]$OutDir = (Join-Path $env:TEMP 'mhw-dlss4')
 )
 $s = $OutDir
 New-Item -ItemType Directory -Force $s | Out-Null

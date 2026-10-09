@@ -1,4 +1,4 @@
-# Experiment helper: sets keys in the deployed MHWDLSS.ini (the plugin hot-reloads it), waits,
+# Experiment helper: sets keys in the deployed MHW-DLSS4.ini (the plugin hot-reloads it), waits,
 # then captures the game window.
 #   try.ps1 -Set 'AutoExposure=0','HDR=0' -Name exp1 [-Wait 3] [-Scale 0.5]
 param(
@@ -7,8 +7,8 @@ param(
     [double]$Wait = 3,
     [double]$Scale = 0.5,
     [int]$X = 0, [int]$Y = 0, [int]$W = 0, [int]$H = 0,
-    [string]$Ini = 'F:\SteamLibrary\steamapps\common\Monster Hunter World\nativePC\plugins\MHWDLSS.ini',
-    [string]$OutDir = (Join-Path $env:TEMP 'mhwdlss')
+    [string]$Ini = 'F:\SteamLibrary\steamapps\common\Monster Hunter World\nativePC\plugins\MHW-DLSS4.ini',
+    [string]$OutDir = (Join-Path $env:TEMP 'mhw-dlss4')
 )
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $lines = [System.Collections.Generic.List[string]](Get-Content -LiteralPath $Ini)

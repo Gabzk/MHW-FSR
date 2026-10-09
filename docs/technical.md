@@ -1,4 +1,4 @@
-# MHWDLSS: technical notes
+# MHW-DLSS4: technical notes
 
 For developers. Players only need the [README](../README.md).
 
@@ -78,7 +78,7 @@ Visual Studio 2022 or newer (MSVC), CMake 3.24+, Ninja, and `fxc` from the Windo
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 tools\deploy.ps1          # copy into the game for testing
-tools\package.ps1         # dist\MHWDLSS-<version>.zip
+tools\package.ps1         # dist\MHW-DLSS4-<version>.zip
 ```
 
 `tools/` also holds the scripts used to verify the conventions against the running game (window
