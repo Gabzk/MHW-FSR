@@ -64,6 +64,29 @@ Versions 0.1 and 0.2 passed the motion vectors unscaled (`MVScaleX/Y=1`). DLSS t
 in the wrong place whenever the camera moved and dropped it, which showed as softer, slightly
 aliased edges in motion. Those keys are ignored now.
 
+## Developer ini keys
+
+The default ini only holds the player settings. These keys are read from an `[Advanced]` section
+(any section works) and default to the values below. Inis written by 0.8.1 and older have the
+first group in them.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `DepthInverted` | 1 | Depth is reversed (sky = 0). |
+| `MVJittered` | 0 | The motion vectors contain the camera jitter. They don't in this game. |
+| `MotionScaleX/Y` | 0.5 / -0.5 | Scale from the game's velocity to DLSS motion vectors. |
+| `JitterScaleX/Y` | 0.5 / -0.5 | Scale from the camera jitter to the DLSS jitter offset (times render scale). |
+| `ForceJitter` | 1 | Keep the camera jitter on while DLSS runs (some scenes switch it off). |
+| `FullPixelJitter` | 1 | Widen the game's half-pixel jitter to a full render pixel while DLSS runs. |
+| `HDR` | -1 | DLSS IsHDR flag: -1 from the game, 0 or 1 forced. |
+| `ExposureScale`, `PreExposure` | 1 | Passed to DLSS evaluate as is. |
+| `NGXLogging` | 0 | NGX's own log lines in `MHW-DLSS4.log`. |
+| `VerboseFrames` | 0 | Log the first 40 TAA passes and evaluations after a reload instead of 4. |
+| `DebugProbe` | 0 | D3D12: log statistics of the DLSS inputs after a reload. |
+| `DebugDumpFrames`, `DebugDumpDelay` | 0, 5 | D3D12: dump N frames of colour, motion, depth and jitter to `MHW-DLSS4\`, starting the given seconds after the reload. |
+| `DebugDumpOutput` | 0 | D3D11: write one DLSS output frame to `MHW-DLSS4\output.bin`. |
+| `DebugFixedJitter`, `DebugJitterX/Y` | 0 | Replace the camera jitter with a constant (camera units). |
+
 ## Building
 
 Visual Studio 2022 or newer (MSVC), CMake 3.24+, Ninja, and `fxc` from the Windows SDK.
@@ -78,7 +101,7 @@ Visual Studio 2022 or newer (MSVC), CMake 3.24+, Ninja, and `fxc` from the Windo
   `third_party/amd_fsr/licence.txt`).
 
 ```
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 tools\deploy.ps1          # copy into the game for testing
 tools\package.ps1         # dist\MHW-DLSS4-<version>.zip

@@ -57,21 +57,6 @@ constexpr wchar_t kDefaultIni[] =
     L"DLLPath=\n"
     L"; Let DLSS estimate exposure itself (presets L and M always do).\n"
     L"AutoExposure=0\n"
-    L"\n"
-    L"[Advanced]\n"
-    L"; Input conventions measured for this game. Change only when debugging.\n"
-    L"DepthInverted=1\n"
-    L"MVJittered=0\n"
-    L"MotionScaleX=0.5\n"
-    L"MotionScaleY=-0.5\n"
-    L"JitterScaleX=0.5\n"
-    L"JitterScaleY=-0.5\n"
-    L"; Keep the camera jitter on while DLSS runs (some scenes switch it off).\n"
-    L"ForceJitter=1\n"
-    L"; The game only jitters across half a pixel; widen it to a full pixel while DLSS runs.\n"
-    L"FullPixelJitter=1\n"
-    L"; Write NGX's own log lines into MHW-DLSS4.log.\n"
-    L"NGXLogging=0\n"
     L"; DLAA mode only: show the game's TAA instead of DLSS, for comparisons.\n"
     L"Bypass=0\n";
 
@@ -221,6 +206,10 @@ void LoadConfig(const std::wstring& ini) {
 
     c.dllPath = ReadString(ini, L"DLSS", L"DLLPath", L"");
     c.autoExposure = ReadBool(ini, L"DLSS", L"AutoExposure", c.autoExposure);
+    c.bypass = ReadBool(ini, L"DLSS", L"Bypass", c.bypass);
+
+    // [Advanced]: developer keys, not in the default ini (docs/technical.md lists them). Inis of 0.8.1
+    // and older still have the measured conventions there, with the default values.
 
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
     c.mvJittered = ReadBool(ini, L"Advanced", L"MVJittered", c.mvJittered);
@@ -238,7 +227,6 @@ void LoadConfig(const std::wstring& ini) {
 
     c.ngxLogging = ReadBool(ini, L"Advanced", L"NGXLogging", c.ngxLogging);
     c.verboseFrames = ReadBool(ini, L"Advanced", L"VerboseFrames", c.verboseFrames);
-    c.bypass = ReadBool(ini, L"Advanced", L"Bypass", c.bypass);
     c.debugProbe = ReadBool(ini, L"Advanced", L"DebugProbe", c.debugProbe);
     c.debugDumpFrames = static_cast<int>(ReadFloat(ini, L"Advanced", L"DebugDumpFrames", 0.0f));
     c.debugDumpDelay = std::clamp(ReadFloat(ini, L"Advanced", L"DebugDumpDelay", c.debugDumpDelay), 0.0f, 60.0f);

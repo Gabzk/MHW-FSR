@@ -81,8 +81,22 @@ bool DlispActive();
 // Render resolution / output resolution as applied this frame (1 for DLAA).
 float RenderScale();
 
+// The renderer's DLSS fields, cheap to read and compare every frame.
+struct RendererState {
+    bool exists = false;
+    uint8_t dlssOn = 0;
+    uint8_t dlispOn = 0;
+    uint32_t mode = 0;
+    float dlssScale = 0.0f;
+    uint32_t featureBits = 0;
+    float scaleRequested = 0.0f;
+    float scaleApplied = 0.0f;
+    const void* context = nullptr;
+    bool operator==(const RendererState&) const = default;
+};
+RendererState ReadState();
 // One-line dump of the renderer's DLSS fields, for the log.
-std::string DescribeState();
+std::string DescribeState(const RendererState& state = ReadState());
 
 // Jitter recorded when the TAA pass that writes `output` was built.
 std::optional<Jitter> JitterForOutput(const void* outputResource);

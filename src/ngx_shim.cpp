@@ -1108,11 +1108,11 @@ void OnFrame() {
         }
     }
 
-    static std::string lastState;
-    std::string state = game::DescribeState();
-    if (state != lastState) {
-        LOGI("renderer: {}", state);
-        lastState = std::move(state);
+    static game::RendererState lastState;
+    game::RendererState state = game::ReadState();
+    if (!(state == lastState)) {
+        LOGI("renderer: {}", game::DescribeState(state));
+        lastState = state;
     }
 }
 
@@ -1142,16 +1142,20 @@ void OnUpdate() {
                      "off and on in the graphics options");
             }
         }
-        static unsigned updates = 0;
-        if (++updates % 30 == 0) ReloadSettings(recompute);
+        static ULONGLONG nextReload = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now >= nextReload) {
+            nextReload = now + 500;
+            ReloadSettings(recompute);
+        }
     }
     // Outside the lock: the game's recompute releases and creates its DLSS features through the
     // shim and may wait for the render thread, which takes the lock to evaluate.
     if (recompute && game::RecomputeRenderScale()) LOGI("render scale refreshed");
 }
 
-// Every 30 updates: the ini and graphics_option.ini. Sets `recompute` when the render scale may
-// have changed.
+// Twice a second: the ini and graphics_option.ini (a timestamp check each). Sets `recompute` when
+// the render scale may have changed.
 void ReloadSettings(bool& recompute) {
     if (ReloadConfigIfChanged()) {
         game::ApplyConfig(g_config);

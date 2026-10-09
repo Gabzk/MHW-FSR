@@ -584,18 +584,31 @@ bool RecomputeRenderScale() {
     return true;
 }
 
-std::string DescribeState() {
+RendererState ReadState() {
+    RendererState s;
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
-    if (!renderer) return "renderer not created";
+    if (!renderer) return s;
     auto u8 = [&](ptrdiff_t off) { return mem::SafeRead<uint8_t>(renderer + off).value_or(0); };
     auto u32 = [&](ptrdiff_t off) { return mem::SafeRead<uint32_t>(renderer + off).value_or(0); };
     auto f32 = [&](ptrdiff_t off) { return mem::SafeRead<float>(renderer + off).value_or(0.0f); };
-    DlssContext* ctx = Context();
+    s.exists = true;
+    s.dlssOn = u8(kRendererDlssOn);
+    s.dlispOn = u8(kRendererDlispOn);
+    s.mode = u32(0xa8);
+    s.dlssScale = f32(0xb0);
+    s.featureBits = u32(kRendererDlssBits);
+    s.scaleRequested = f32(0x200);
+    s.scaleApplied = f32(kRendererScaleApplied);
+    s.context = Context();
+    return s;
+}
+
+std::string DescribeState(const RendererState& s) {
+    if (!s.exists) return "renderer not created";
     return std::format(
         "DLSS on {}, DLISP on {}, mode {}, DLSS scale {:.3f}, feature bits {}, render scale {:.3f}/{:.3f}, "
         "context {}",
-        u8(kRendererDlssOn), u8(0xa6), u32(0xa8), f32(0xb0), u32(kRendererDlssBits), f32(0x200), f32(0x204),
-        static_cast<void*>(ctx));
+        s.dlssOn, s.dlispOn, s.mode, s.dlssScale, s.featureBits, s.scaleRequested, s.scaleApplied, s.context);
 }
 
 float RenderScale() {

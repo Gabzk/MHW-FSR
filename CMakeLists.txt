@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MHW-DLSS4 VERSION 0.8.1 LANGUAGES CXX)
+project(MHW-DLSS4 VERSION 0.8.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # The game loads plugins with LoadLibrary; static CRT keeps the plugin self-contained.
 # nvsdk_ngx_s.lib is built against the static CRT as well.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set(DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlss_sdk")
 set(NIS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nis")
@@ -64,8 +67,12 @@ add_library(MHW-DLSS4 SHARED
 target_include_directories(MHW-DLSS4 PRIVATE src "${DLSS_SDK_DIR}/include" "${NIS_DIR}" "${SHADER_DIR}")
 target_compile_definitions(MHW-DLSS4 PRIVATE
   WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS
-  MHW_DLSS4_VERSION="${PROJECT_VERSION}")
-target_compile_options(MHW-DLSS4 PRIVATE /W4 /permissive- /utf-8 /EHsc /Zi)
+  MHW_DLSS4_VERSION="${PROJECT_VERSION}"
+  $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+# Optimisation is set here as well, not only through CMAKE_CXX_FLAGS_<CONFIG>: a build folder first
+# configured without the MSVC environment caches those as empty, and its builds come out unoptimised
+# (0.7.3 and 0.8.1 were). /Zi and /DEBUG keep a PDB for crash dumps in every configuration.
+target_compile_options(MHW-DLSS4 PRIVATE /W4 /permissive- /utf-8 /EHsc /Zi "$<$<NOT:$<CONFIG:Debug>>:/O2;/Gw>")
 target_link_options(MHW-DLSS4 PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 
 target_link_libraries(MHW-DLSS4 PRIVATE

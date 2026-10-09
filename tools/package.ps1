@@ -16,6 +16,7 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $plugins = New-Item -ItemType Directory -Force (Join-Path $stage 'nativePC\plugins')
 Copy-Item (Join-Path $build 'MHW-DLSS4.dll') $plugins
 Copy-Item (Join-Path $root 'README.md') (Join-Path $stage 'MHW-DLSS4-README.md')
+Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'MHW-DLSS4-LICENSE.txt')
 
 # Licences of what the plugin and the package contain: NVSharpen (NVIDIA Image Scaling SDK, MIT)
 # and RCAS (AMD FidelityFX FSR 1.0, MIT)

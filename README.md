@@ -1,3 +1,5 @@
+![MHW-DLSS4: DLSS 4 for Monster Hunter: World](images/banner_m.jpg)
+
 # MHW-DLSS4
 
 A proper DLSS 4 port for Monster Hunter: World, implemented as a drag-and-drop Stracker's Loader plugin.
@@ -20,7 +22,7 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 ## Requirements
 
 - An NVIDIA RTX GPU, plus either a current driver (it downloads DLSS for you) or an `nvngx_dlss.dll` 3.x or 4.x of your choice (see [Using a specific DLSS version](#using-a-specific-dlss-version)). 310.x (DLSS 4) is recommended.
-- [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982), or any loader that loads the DLLs in `nativePC\plugins`. Works together with SharpPluginLoader 2.0 (version 0.8.1 and newer).
+- [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982), or any loader that loads the DLLs in `nativePC\plugins`.
 
 ## Install
 
@@ -34,13 +36,6 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 
 To uninstall, delete `MHW-DLSS4.dll`, `MHW-DLSS4.ini`, `MHW-DLSS4.log` and the `MHW-DLSS4` folder in
 `nativePC\plugins`.
-
-**Upgrading from MHWDLSS (0.7.x and older):** the plugin was renamed. Delete the old
-`MHWDLSS.dll`, `MHWDLSS.ini` and `MHWDLSS.log` from `nativePC\plugins`. If you put an
-`nvngx_dlss.dll` of your own into the `MHWDLSS` folder, move it to `MHW-DLSS4`, then delete the
-`MHWDLSS` folder. Copy any settings you changed from the old ini into `MHW-DLSS4.ini`, and if
-`DLLPath` points into the old folder, change it to the new one. While the old DLL is still there,
-only one of the two works, and `MHW-DLSS4.log` reminds you to remove the old files.
 
 ## Settings
 
@@ -58,8 +53,8 @@ You can edit `nativePC\plugins\MHW-DLSS4.ini` while the game runs; changes apply
 | `Bypass` | 0 / 1 | DLAA mode only: show the game's TAA for comparison. |
 | `LogLevel` | `Debug`, `Info`, `Warn`, `Error` | How much goes into `MHW-DLSS4.log` next to the plugin. |
 
-The `[Advanced]` keys describe how the game's motion vectors, depth and camera jitter work. They
-were measured for this game and should not need changing.
+Ini files from 0.8.1 and older also have an `[Advanced]` section: settings measured for this game,
+now built in. You can delete that section.
 
 ### Sharpening
 
@@ -99,7 +94,7 @@ started sharpening above 1, and the slider stops at 1.
 ## Using a specific DLSS version
 
 By default the plugin uses the newest DLSS your NVIDIA driver has downloaded. To use a particular
-`nvngx_dlss.dll` instead, for example an older version you prefer or one from another game:
+`nvngx_dlss.dll` instead, for example an older version you prefer, one from another game or when playing on Linux:
 
 - **Easiest:** put the DLL into `nativePC\plugins\MHW-DLSS4`. The plugin uses it when it is newer
   than the driver's.
@@ -128,6 +123,8 @@ DLLPath=D:\DLSS versions\310.9\nvngx_dlss.dll
 Never put an `nvngx_dlss.dll` directly in `nativePC\plugins`: Stracker's Loader loads every DLL
 there. If the path is wrong, the log says so and the plugin falls back to the driver's DLSS.
 
+Always use reputable sources to obtain `nvngx_dlss.dll` files, like [DLSS Swapper](https://github.com/beeradmoore/dlss-swapper), but DON'T use it to swap .dll, only for direct downloads.
+
 ## Troubleshooting
 
 The plugin writes everything it does to `nativePC\plugins\MHW-DLSS4.log`. When something seems off,
@@ -145,8 +142,6 @@ look there first.
 - **NVIDIA App DLSS override:** it works on top of this plugin, as in any other DLSS game.
 - **The game starts in DirectX 11 after a crash:** the game switches itself to DirectX 11 after a
   graphics crash. Turn DirectX 12 back on in the graphics options.
-- **Grey screen with SharpPluginLoader:** update to 0.8.1 or newer. If the log ever says to turn
-  NVIDIA DLSS off and on, do that in the graphics options.
 - **Shiny metal edges look blocky in Balanced or Performance:** that is the game's own shimmering
   highlights at the lower render resolution, which DLSS cannot fully smooth out. Quality or DLAA,
   or less sharpening, helps.
@@ -172,3 +167,10 @@ and the game is back to normal. The technical details are in
 ## Building from source
 
 See [docs/technical.md](docs/technical.md#building).
+
+## Licence
+
+MHW-DLSS4 is released under the [BSD 2-Clause License](LICENSE): you can use, change and share it,
+also as a built DLL, as long as the copyright notice and licence text come along. The DLL also
+contains parts of NVIDIA's DLSS SDK, NVIDIA Image Scaling and AMD FidelityFX, which keep their own
+licences (listed in `MHW-DLSS4-THIRD-PARTY.txt` in the download).

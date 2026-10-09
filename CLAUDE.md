@@ -2,8 +2,11 @@
 
 DLSS 4 for Monster Hunter: World (Iceborne, game version 15.2x, tested on 15.23), as a native
 plugin DLL loaded by Stracker's Loader from `nativePC\plugins`. C++20, MSVC, CMake + Ninja.
-Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.8.0 at the time of writing).
-Releases are git tags (`v0.8.0`); the repo is private on GitHub (`odt1/MHW-DLSS4`).
+Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.8.2 at the time of writing).
+Releases are git tags (`v0.8.2`) with the zip attached as a GitHub release; the repo is private on
+GitHub (`odt1/MHW-DLSS4`). Licence: BSD-2-Clause (`LICENSE`, "Copyright (c) 2026, odt1"), for the
+project's own code. No copyleft code or licence: the DLSS SDK licence (4e) forbids using the SDK in a
+way that puts it under terms requiring source release, and the DLL links `nvsdk_ngx_s.lib`.
 
 Called MHWDLSS (`MHWDLSS.dll/.ini/.log`, `MHWDLSS\` folder, repo `odt1/MHWDLSS`) up to 0.7.3;
 renamed to MHW-DLSS4 in 0.8.0. The ini, log and data folder names follow the DLL's file name.
@@ -51,15 +54,20 @@ screenshots, Affinity files), the other loaders and mods (`Stracker's Loader Bin
 Machine-specific setup is in the user's global CLAUDE.md (pwsh, `devshell` for MSVC, Git Bash).
 
 ```
-pwsh:  . $PROFILE; devshell; cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+pwsh:  . $PROFILE; devshell; cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 pwsh:  . $PROFILE; devshell; cmake --build build
 tools\deploy.ps1       copies build\MHW-DLSS4.dll + .pdb into the game (game must be closed)
 tools\package.ps1      dist\MHW-DLSS4-<version>.zip: DLL, default ini (extracted from kDefaultIni in
-                       config.cpp), README as MHW-DLSS4-README.md, THIRD-PARTY notices
+                       config.cpp), README as MHW-DLSS4-README.md, LICENSE as
+                       MHW-DLSS4-LICENSE.txt, THIRD-PARTY notices
 ```
 
 Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dlss.dll` unless
-`package.ps1 -Dlss <path>`. Before changing source, keep a copy of the last released `src/`
+`package.ps1 -Dlss <path>`. CMakeLists.txt sets `/O2 /Gw` and `NDEBUG` on the target for every
+non-Debug build (plus `/Zi /DEBUG` for the PDB): the old `build\` folder had empty cached
+`CMAKE_CXX_FLAGS_<CONFIG>` (first configured without the MSVC environment), so 0.7.3 and 0.8.1
+shipped unoptimised (`/Od`). Check the `FLAGS` line in `build\build.ninja` after a fresh configure.
+Before changing source, keep a copy of the last released `src/`
 (the repo is in git now, so a tag per release does the job).
 
 ## Game, files, test workflow
@@ -68,8 +76,8 @@ Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dl
   `steam://rungameid/582010`. The exe is SteamStub-packed; the unpacked copy for RE is
   `re\MonsterHunterWorld.exe.unpacked.exe` (Steamless at `C:\Applications\Steamless 0.5`). Image base
   0x140000000 (no ASLR), so exe addresses below are absolute VAs; the plugin logs RVAs (+0x...).
-- Plugin files in `nativePC\plugins`: `MHW-DLSS4.dll`, `MHW-DLSS4.ini` (hot-reloaded, checked every 30
-  frames by mtime from the TAA update), `MHW-DLSS4.log`, and the `MHW-DLSS4\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
+- Plugin files in `nativePC\plugins`: `MHW-DLSS4.dll`, `MHW-DLSS4.ini` (hot-reloaded, mtime checked
+  twice a second from the TAA update), `MHW-DLSS4.log`, and the `MHW-DLSS4\` folder (NGX data, `driver\nvngx_dlss.dll` copy,
   `custom\`). Never put a DLL directly in `nativePC\plugins`: the loader loads every DLL there.
 - The user also runs `MonsterHunterFixorld.dll` (their own swapchain/frame-latency/loading plugin;
   its log shows fps, hitches and `ResizeBuffers` with the swapchain format), `!CRCBypass.dll`,
@@ -259,7 +267,7 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
 
 - `tools/` top level: `deploy.ps1`, `package.ps1`, `capture-window.ps1`, `screenshot.ps1`,
   `try.ps1` (set ini keys, wait, capture; appends missing keys at the end of the ini, i.e. in
-  [Advanced]; the config falls back across sections), `experiment.ps1` + `metrics.py` (detail /
+  [DLSS]; the config falls back across sections), `experiment.ps1` + `metrics.py` (detail /
   flicker per ini variant), `burst.ps1`, `shift_compare.py`, `jitter_analysis.py`,
   `motion_check.py`, `mv_analysis.py`, `bin2png.py`.
 - `tools/re/` (run on `re\MonsterHunterWorld.exe.unpacked.exe`): `strfind.py` (strings + VA),
@@ -287,7 +295,9 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
   thread safety (ini reload on the main thread, recompute outside the mutex, atomic hook settings,
   depth-alias CAS, sharpen-flag guard), hooks inactive until NGX is installed, AA hold released
   when NGX is unavailable, mirrors freed in DLAA, sharpen uses the retire queue, test scripts
-  handle LF inis.
+  handle LF inis. 0.8.0 rename; 0.8.1 SharpPluginLoader 2.0 (early load); 0.8.2 optimised build,
+  ini checked by time (500 ms), developer keys out of the default ini (listed in
+  docs/technical.md; `Bypass` moved to [DLSS]), renderer state compared without formatting.
 - Not exercised by tests: the NGX shutdown path (only at game exit; the test runs kill the game)
   and the NGX-unavailable release.
 - To verify: run-time Mode switches with a real HDR10 swapchain (Windows HDR on, ScreenMode=HDRMode;
