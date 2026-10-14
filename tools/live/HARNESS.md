@@ -1,10 +1,6 @@
 # mhwharness.py: driving MHW into the world, reading the player, measuring input latency
 
-`tools/live/mhwharness.py` starts Monster Hunter: World (Iceborne 15.23, Steam) and gets it into the game world
-with the player controllable, with no human input. It also reads the player's position and sends keyboard and
-mouse input. Its `react` command measures how long a key press takes to move the player in the simulation. It
-uses only Python's standard library with ctypes (ReadProcessMemory, SendInput, PrintWindow), and it never
-writes game memory.
+`tools/live/mhwharness.py` starts Monster Hunter: World (Iceborne 15.23, Steam) and gets it into the game world with the player controllable, with no human input. It also reads the player's position and sends keyboard and mouse input. Its `react` command measures how long a key press takes to move the player in the simulation. It uses only Python's standard library with ctypes (ReadProcessMemory, SendInput, PrintWindow), and it never writes game memory.
 
 ```
 uv run --quiet python -I tools\live\mhwharness.py <command> [args]      (--help on each command)
@@ -31,10 +27,7 @@ mhwharness.py react w --count 30 --csv a.csv  # alternates W and S so the hunter
 mhwharness.py kill
 ```
 
-The game reads input through DirectInput, which only sees it while its window is in the foreground. So every
-input command calls `SetForegroundWindow` (with `AttachThreadInput`) and waits 0.3 s before sending. This was
-tested with Notepad in front: the game came back and W moved the player. `react` checks the foreground before
-every try and brings the game back if needed.
+The game reads input through DirectInput, which only sees it while its window is in the foreground. So every input command calls `SetForegroundWindow` (with `AttachThreadInput`) and waits 0.3 s before sending. This was tested with Notepad in front: the game came back and W moved the player. `react` checks the foreground before every try and brings the game back if needed.
 
 ## Menu flow and keys (observed 2026-10-14, user's save and bindings)
 
@@ -54,20 +47,11 @@ every try and brings the game back if needed.
 | 12 | Astera, "Continuing the game in offline mode. ... [Close]" | `in-game-notice` (HUD + `uGUINetworkErrorWindow`) | **Space** | 1 s |
 | 13 | Astera, HUD only | `in-game` | 1 s settle, then the W probe | |
 
-The button guides show **F = Confirm** and **right mouse button = Back** (main menu and save select). On the save
-select, **R = Delete Save Data** and **N = Re-edit Character**: the harness only ever sends Up, Down and F there.
-The menus wrap (Up on slot 1 selects slot 3), so the harness steers by the index in memory, never by counting
-key presses.
+The button guides show **F = Confirm** and **right mouse button = Back** (main menu and save select). On the save select, **R = Delete Save Data** and **N = Re-edit Character**: the harness only ever sends Up, Down and F there. The menus wrap (Up on slot 1 selects slot 3), so the harness steers by the index in memory, never by counting key presses.
 
-**Mouse hover moves the selection.** The game draws its own cursor, and the item under it becomes selected even
-after keyboard input. Seen in practice: the main menu opened with "Quit" selected, and a parked cursor selected
-"New Game" in the save select. On the first menu screen, `to-game` therefore moves the cursor into the
-bottom-right corner (where nothing is selectable on these screens). It only confirms once the index has been
-right for 0.4 s. Both cases were tested: the cursor was placed on "Quit" and on a "New Game" slot, and `to-game`
-still loaded slot 1.
+**Mouse hover moves the selection.** The game draws its own cursor, and the item under it becomes selected even after keyboard input. Seen in practice: the main menu opened with "Quit" selected, and a parked cursor selected "New Game" in the save select. On the first menu screen, `to-game` therefore moves the cursor into the bottom-right corner (where nothing is selectable on these screens). It only confirms once the index has been right for 0.4 s. Both cases were tested: the cursor was placed on "Quit" and on a "New Game" slot, and `to-game` still loaded slot 1.
 
-Timing of a cold start (`kill`, then `to-game`, 2026-10-14). Columns: seconds since `to-game` started, seconds
-since the process started, and time spent in the stage:
+Timing of a cold start (`kill`, then `to-game`, 2026-10-14). Columns: seconds since `to-game` started, seconds since the process started, and time spent in the stage:
 
 ```
 starting           6.1     2.3   (0.2)    Steam start: process after 4.1 s, window after 6.1 s
@@ -87,17 +71,13 @@ in-game           40.2    36.4   (1.8)    settle + W probe
 controllable      42.1    38.3
 ```
 
-Three complete cold starts took 44.1 s, 42.1 s and 40.2 s. The slowest lost 6 s because an F pressed 0.6 s after the
-save select appeared was ignored; since then the harness waits 1.5 s there. Starting `to-game` from the offline
-dialog, the main menu (cursor on "Quit") or the save select (cursor on "New Game") also worked: 20.2 s, 12.9 s
-and 8.9 s to control.
+Three complete cold starts took 44.1 s, 42.1 s and 40.2 s. The slowest lost 6 s because an F pressed 0.6 s after the save select appeared was ignored; since then the harness waits 1.5 s there. Starting `to-game` from the offline dialog, the main menu (cursor on "Quit") or the save select (cursor on "New Game") also worked: 20.2 s, 12.9 s and 8.9 s to control.
 
 ## State detection (memory only, `detect()`)
 
 The state comes from four signals, checked in this order:
 
-1. **Active GUI units.** The harness walks `sMhUnit`'s GUI unit list (+0x13e0) and the system list (+0x15d0),
-   reads each unit's MT class name, and treats a unit as shown when `unit+0x14` has bit 0x10.
+1. **Active GUI units.** The harness walks `sMhUnit`'s GUI unit list (+0x13e0) and the system list (+0x15d0), reads each unit's MT class name, and treats a unit as shown when `unit+0x14` has bit 0x10.
 2. **The local player**, found the same way the game's getter finds it.
 3. **The HUD:** any `uGUIHud*` unit active.
 4. **Title GUI fields:** `uGUITitle` phase and menu index, `uGUITitleDataSelect` slot index.
@@ -106,11 +86,9 @@ The rules, in order:
 
 - `uGUICommonSaveLoad` active → `loading`. During a load the HUD is already active, so this check comes first.
 - HUD and player present →
-  - `in-game` when no other `uGUI*` unit is active. The chat, cursor, button-assign and saving-icon units do not
-    count as other units.
+  - `in-game` when no other `uGUI*` unit is active. The chat, cursor, button-assign and saving-icon units do not count as other units.
   - `in-game-notice` when the only other unit is `uGUINetworkErrorWindow`.
-  - `in-game-ui` otherwise. Examples: the Esc start menu shows as `uGUIStartMenu`, `uGUIStatusSideBar`,
-    `uGUIMoney`, `uGUIPoint`, `uGUICommonTextOperation`.
+  - `in-game-ui` otherwise. Examples: the Esc start menu shows as `uGUIStartMenu`, `uGUIStatusSideBar`, `uGUIMoney`, `uGUIPoint`, `uGUICommonTextOperation`.
 - `uGUICommonMessageWindow` → `message`.
 - `uGUITitleDataSelect` → `save-select`.
 - `uGUITitle` with phase 2 → `title`, with phase 4 → `main-menu`, any other phase → `title-busy`.
@@ -119,27 +97,15 @@ The rules, in order:
 - `uGUILogo` → `logos`.
 - Anything else → `transition`.
 
-A player alone does not mean in-game. On the title screen the getter already returns a `uPlayer` for the
-title scene (position 85, 0, -55), so the HUD is required as well.
+A player alone does not mean in-game. On the title screen the getter already returns a `uPlayer` for the title scene (position 85, 0, -55), so the HUD is required as well.
 
-**Controllable** = state `in-game` **and** holding W for 0.3 s moves the player at least 5 units. In the
-tests it moved 78-100 units. `to-game` ends on this probe (at most 3 tries). The probe walks the hunter about 1 m,
-which is allowed. Without moving the player, `state` = `in-game` is the passive form of the check. It was correct in
-every observed case, but it is a GUI-based rule, so a GUI that blocks control without being a `uGUI*` unit would
-not be caught.
+**Controllable** = state `in-game` **and** holding W for 0.3 s moves the player at least 5 units. In the tests it moved 78-100 units. `to-game` ends on this probe (at most 3 tries). The probe walks the hunter about 1 m, which is allowed. Without moving the player, `state` = `in-game` is the passive form of the check. It was correct in every observed case, but it is a GUI-based rule, so a GUI that blocks control without being a `uGUI*` unit would not be caught.
 
 ## Memory map and evidence
 
-Binary: `MonsterHunterWorld.exe` 15.23.00 (window title `MONSTER HUNTER: WORLD(421810)`, title screen
-"Ver. 15.23.00"). As installed (SteamStub) its SHA-256 is
-`c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea`. The unpacked copy
-`re\MonsterHunterWorld.exe.unpacked.exe` has SHA-256
-`fe50d8468881ff8cb094c5f9a599a5d6b2965950331a22ee34148c612651c521`. Image base 0x140000000, no ASLR, so the
-addresses below are absolute VAs. Live checks were made in 8 game processes on 2026-10-14. The player chain
-resolved in each one, with a different `uPlayer` address each time.
+Binary: `MonsterHunterWorld.exe` 15.23.00 (window title `MONSTER HUNTER: WORLD(421810)`, title screen "Ver. 15.23.00"). As installed (SteamStub) its SHA-256 is `c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea`. The unpacked copy `re\MonsterHunterWorld.exe.unpacked.exe` has SHA-256 `fe50d8468881ff8cb094c5f9a599a5d6b2965950331a22ee34148c612651c521`. Image base 0x140000000, no ASLR, so the addresses below are absolute VAs. Live checks were made in 8 game processes on 2026-10-14. The player chain resolved in each one, with a different `uPlayer` address each time.
 
-Labels: **observed** = seen in memory, disassembly or a trace; **inferred** = concluded from observations;
-**unknown** = not established.
+Labels: **observed** = seen in memory, disassembly or a trace; **inferred** = concluded from observations; **unknown** = not established.
 
 | what | where | evidence | label |
 | --- | --- | --- | --- |
@@ -163,34 +129,26 @@ How these were found, for re-doing it after a game update:
 
 - MT names come from the DTI pattern above.
 - Singletons came from scanning `.data`.
-- The position came from reading `uPlayer+0x160` while holding W, then searching the singletons for pointers to
-  that `uPlayer` (`sPlayer+0x58`, `sPlayer+0xae48`, `sMhUnit+0xa30`, ...), then reading the getter.
-- Menu fields came from diffing GUI objects across key presses, plus a value scan (numpy over the 2.1 GB of
-  private read/write memory) for the slot index.
+- The position came from reading `uPlayer+0x160` while holding W, then searching the singletons for pointers to that `uPlayer` (`sPlayer+0x58`, `sPlayer+0xae48`, `sMhUnit+0xa30`, ...), then reading the getter.
+- Menu fields came from diffing GUI objects across key presses, plus a value scan (numpy over the 2.1 GB of private read/write memory) for the slot index.
 
 The helper scripts are in the job scratch folder, not in the repo.
 
-**Cheat Engine caution:** a first scan for a common value (exact dword 0) over all memory wrote 56 GB of
-temp files and failed with "Stream write error". Use selective scans (rare values, address ranges), or a numpy
-scan of the private read/write regions.
+**Cheat Engine caution:** a first scan for a common value (exact dword 0) over all memory wrote 56 GB of temp files and failed with "Stream write error". Use selective scans (rare values, address ranges), or a numpy scan of the private read/write regions.
 
 ## react: method and results
 
 For each try:
 
-1. Wait until the player stands still for 300 ms (position ±0.001 units, rotation ±1e-4), then wait a random
-   0-17 ms more.
+1. Wait until the player stands still for 300 ms (position ±0.001 units, rotation ±1e-4), then wait a random 0-17 ms more.
 2. `t0` = QueryPerformanceCounter, then `SendInput` the key down (scan code).
-3. Poll as fast as possible with ReadProcessMemory: `uPlayer+0x160..+0x17f`, the frame counter, and the key's
-   byte in `sMhKeyboard+0x138`.
-4. Record when `SendInput` returned, when the game read the key (its bit appears), and the first position change
-   larger than 0.001 units.
+3. Poll as fast as possible with ReadProcessMemory: `uPlayer+0x160..+0x17f`, the frame counter, and the key's byte in `sMhKeyboard+0x138`.
+4. Record when `SendInput` returned, when the game read the key (its bit appears), and the first position change larger than 0.001 units.
 5. Release the key 150 ms after `t0`. Tries alternate W and S so the hunter stays in place.
 
 Results on 2026-10-14 in Astera:
 
-- Settings: plugin Mode DLAA, Reflex Off, frame limit 0, the game's Frame Rate at No Limit, control panel V-Sync
-  off.
+- Settings: plugin Mode DLAA, Reflex Off, frame limit 0, the game's Frame Rate at No Limit, control panel V-Sync off.
 - Frame rate: about 135 fps (7.3-7.4 ms per frame). The plugin's line read "input to GPU done 19.1-19.4 ms".
 - The title screen runs at 60-240 fps, so measure in the world.
 
@@ -201,36 +159,19 @@ Results on 2026-10-14 in Astera:
 
 Reading:
 
-- The game picks up the key at the start of the first frame after it arrives. That wait spreads over one frame
-  (observed).
-- The position changes exactly **one frame after** that read, in every try: the read→position time equals the
-  frame interval. Whether the movement is computed in the read frame and applied at the start of the next one,
-  or first computed in the next one, is not established; either way it costs one frame.
+- The game picks up the key at the start of the first frame after it arrives. That wait spreads over one frame (observed).
+- The position changes exactly **one frame after** that read, in every try: the read→position time equals the frame interval. Whether the movement is computed in the read frame and applied at the start of the next one, or first computed in the next one, is not established; either way it costs one frame.
 - So key → simulation = (wait for the next frame start) + 1 frame, about 1.0-2.3 frames at 135 fps.
-- `SendInput` itself takes about 2 ms on this machine (synchronous, probably because of low-level input hooks;
-  the cause is unknown). A frame can start during the call, so the latency is measured from the call's start.
-  `react` prints the call time separately.
+- `SendInput` itself takes about 2 ms on this machine (synchronous, probably because of low-level input hooks; the cause is unknown). A frame can start during the call, so the latency is measured from the call's start. `react` prints the call time separately.
 
 ## Failure modes and cautions
 
-- **Saving:** `message` states ("Loading data", "Saving data", "Checking for add-on content") and the autosave
-  icon mean the game may be writing the save. Use `kill`, which waits for them, instead of a blind Stop-Process.
-- **First confirm ignored:** the save select ignores F for about a second after it appears. The harness waits
-  1.5 s there and repeats a press only after 4-6 s.
-- **Mouse hover** selects menu items (see above). The harness parks the cursor and checks the index before
-  confirming. If the index does not follow 4 key presses, `to-game` fails with a screenshot instead of guessing.
-- **Unknown GUI in the world** (start menu, NPC dialog, a pop-up): state `in-game-ui`. `to-game` waits
-  `--ui-timeout` (15 s), then fails. It does not press Esc on its own.
-- **Foreground:** input only works with the game in front. The harness steals focus (agreed for tests). A user
-  clicking elsewhere during `react` costs a re-focus, which `react` handles between tries.
-- **PrintWindow** sometimes returns an all-black frame; `shot` retries up to 4 times. Loading screens are
-  legitimately dark.
-- **Untested:** an online session (local player in another slot: `player()` follows the game's getter, but this
-  was not exercised); a save that starts somewhere other than Astera (the detector does not depend on the place);
-  a cold file cache (loads were about 3 s, the files were cached); Steam not running or not logged in (launch
-  would hit its timeout); in-game autosave.
-- **Other keys:** Enter does not close the offline dialog. Space works for the dialogs and "Press Any Button". F
-  is the menu confirm, as the button guide shows. `--confirm` and `--dialog-key` exist in case the bindings
-  change.
-- **Window:** the game window has class `MT FRAMEWORK`. A loader console (`ConsoleWindowClass`) also reports the
-  game's pid; the harness ignores it. The window is 2560x1421 for its first seconds, then 2560x1440.
+- **Saving:** `message` states ("Loading data", "Saving data", "Checking for add-on content") and the autosave icon mean the game may be writing the save. Use `kill`, which waits for them, instead of a blind Stop-Process.
+- **First confirm ignored:** the save select ignores F for about a second after it appears. The harness waits 1.5 s there and repeats a press only after 4-6 s.
+- **Mouse hover** selects menu items (see above). The harness parks the cursor and checks the index before confirming. If the index does not follow 4 key presses, `to-game` fails with a screenshot instead of guessing.
+- **Unknown GUI in the world** (start menu, NPC dialog, a pop-up): state `in-game-ui`. `to-game` waits `--ui-timeout` (15 s), then fails. It does not press Esc on its own.
+- **Foreground:** input only works with the game in front. The harness steals focus (agreed for tests). A user clicking elsewhere during `react` costs a re-focus, which `react` handles between tries.
+- **PrintWindow** sometimes returns an all-black frame; `shot` retries up to 4 times. Loading screens are legitimately dark.
+- **Untested:** an online session (local player in another slot: `player()` follows the game's getter, but this was not exercised); a save that starts somewhere other than Astera (the detector does not depend on the place); a cold file cache (loads were about 3 s, the files were cached); Steam not running or not logged in (launch would hit its timeout); in-game autosave.
+- **Other keys:** Enter does not close the offline dialog. Space works for the dialogs and "Press Any Button". F is the menu confirm, as the button guide shows. `--confirm` and `--dialog-key` exist in case the bindings change.
+- **Window:** the game window has class `MT FRAMEWORK`. A loader console (`ConsoleWindowClass`) also reports the game's pid; the harness ignores it. The window is 2560x1421 for its first seconds, then 2560x1440.
