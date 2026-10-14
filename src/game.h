@@ -54,9 +54,28 @@ void* GameAlloc(size_t size);
 // Called at every TAA pass build, before the pass is built. The game builds the pass on worker
 // threads, possibly more than once per frame and at the same time.
 void SetFrameCallback(void (*callback)());
-// Called once per frame on the game's main thread, from the TAA filter's update (which also runs
-// while the filter is switched off).
+// Called once per frame from the TAA filter's update (which also runs while the filter is switched
+// off), part of the main thread's update: mostly on the main thread, sometimes on a job thread.
 void SetUpdateCallback(void (*callback)());
+// Called at the start of every game frame on the main thread, before the game's frame rate limiter
+// and its input polling.
+void SetFrameStartCallback(void (*callback)());
+// Called when the game polls the mouse, once per frame on the main thread.
+void SetInputCallback(void (*callback)());
+
+// The swap chain the game presents through (IDXGISwapChain*), null before it has one.
+void* SwapChain();
+// The events the main thread starts the render thread with and the render thread signals when it
+// has submitted the frame (null when the game renders on the main thread).
+struct RenderEvents {
+    void* start = nullptr;
+    void* done = nullptr;
+};
+RenderEvents RenderThreadEvents();
+// The exe's import slots for SetEvent and WaitForSingleObject, which the game sets and waits for
+// the render thread events through (null when not found).
+void** SetEventImport();
+void** WaitForSingleObjectImport();
 
 // The renderer's frame counter (0 before the renderer exists).
 uint64_t Frame();

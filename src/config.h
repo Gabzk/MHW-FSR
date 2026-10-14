@@ -13,6 +13,13 @@ enum class Sharpener {
     Rcas,       // AMD FidelityFX RCAS
 };
 
+// NVIDIA Reflex Low Latency mode (see reflex.h).
+enum class ReflexMode {
+    Off,
+    On,
+    Boost,  // On, plus the graphics card kept at full clock speed
+};
+
 // No Ultra Performance: the game clamps its render scale to 0.5 and above.
 enum class QualityMode {
     DLAA,
@@ -36,6 +43,9 @@ struct Config {
     float sharpness = 0.33f;
     Sharpener sharpener = Sharpener::NVSharpen;
 
+    ReflexMode reflex = ReflexMode::On;
+    float frameLimit = 0.0f;  // [Advanced] frames per second through Reflex, 0 = no limit
+
     // Input conventions, measured for this game (see game.cpp and ngx_shim.cpp).
     bool depthInverted = true;
     bool mvJittered = false;
@@ -49,6 +59,9 @@ struct Config {
     float jitterScaleY = -0.5f;
     bool forceJitter = true;      // keep the TAA jitter on while DLSS is active
     bool fullPixelJitter = true;  // double the game's half-pixel jitter while DLSS is active
+    // Hold the game's 2x2 reflection history swap (the scene's mSSLRGBufferJitter) off while DLSS
+    // runs (see game.cpp).
+    bool reflectionFix = true;
     int hdr = -1;                 // -1 = from the game / input format, 0 or 1 = force
     float exposureScale = 1.0f;
     float preExposure = 1.0f;
@@ -64,6 +77,8 @@ struct Config {
     bool debugFixedJitter = false; // replace the camera jitter with a constant (camera units)
     float debugJitterX = 0.0f;
     float debugJitterY = 0.0f;
+    bool latencyStats = false;    // log NVIDIA's latency report every few seconds (Reflex markers)
+    bool reflexSleep = true;      // call NvAPI_D3D_Sleep each frame (0: markers only)
 
     // Render scale implied by the mode (1.0 for DLAA).
     float RenderScale() const;
@@ -84,8 +99,11 @@ bool ReloadConfigIfChanged();
 void LoadGameOptions(const std::wstring& path);
 bool ReloadGameOptionsIfChanged();
 float GameSharpness();
+// The game's Frame Rate option: the cap in frames per second, 0 for No Limit.
+int GameFrameRate();
 
 const char* QualityModeName(QualityMode mode);
 const char* SharpenerName(Sharpener sharpener);
+const char* ReflexModeName(ReflexMode mode);
 
 }  // namespace mhwdlss

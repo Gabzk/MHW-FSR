@@ -64,6 +64,12 @@ constexpr ptrdiff_t kDrawSlotFromUpdate = 3;
 constexpr std::string_view kSceneAaSetterPattern =
     "44 0F B6 C2 84 D2 74 ?? 41 83 E8 01 74 ?? 41 83 E8 01 74 ?? 41 83 F8 01 75 ?? 66 C7 81 ?? ?? ?? ?? 01 01 C3";
 constexpr ptrdiff_t kSceneAaSetterDisp = 29;
+// Picking the screen-space reflection resolve technique (in +0x2286260): the scene's
+// mGlobalEnvMapEachWaterAttn, mSSLRDitherResolve and mSSLRGBufferJitter bytes go to the selector
+// (+0x227ec90). Only searched for the offset of mSSLRGBufferJitter.
+constexpr std::string_view kSslrResolveSelectPattern =
+    "44 0F B6 8E ?? ?? ?? ?? 85 C0 44 0F B6 86 ?? ?? ?? ?? 0F B6 96 ?? ?? ?? ?? 0F 94 C1 88 5C 24 20 E8";
+constexpr ptrdiff_t kSslrGBufferJitterDisp = 21;
 // Paired getters "is DX11" / "is DX12" reading the same global byte.
 constexpr std::string_view kApiFlagPattern =
     "80 3D ?? ?? ?? ?? 00 0F 94 C0 C3 CC CC CC CC CC 0F B6 05 ?? ?? ?? ?? C3";
@@ -71,6 +77,30 @@ constexpr std::string_view kApiFlagPattern =
 constexpr std::string_view kOperatorNewPattern =
     "4C 8B 0D ?? ?? ?? ?? 4D 85 C9 74 ?? 49 8B 01 48 8B D1 41 B8 10 00 00 00 49 8B C9 48 FF 60 48";
 constexpr ptrdiff_t kDeviceImmediateContext11 = 0x1400;
+// Swap chains of the device (count at +0x14a0, 0x48 bytes each): the D3D12 present calls Present on
+// the interface at +0x1470 (exe +0x23aa1d4), the D3D11 present on the one at +0x1488 (+0x23aa330).
+constexpr ptrdiff_t kDeviceSwapChain12 = 0x1470;
+constexpr ptrdiff_t kDeviceSwapChain11 = 0x1488;
+constexpr ptrdiff_t kDeviceSwapChainCount = 0x14a0;
+// Render thread (config.ini RenderingThread=ON): started each frame through the event at +0x1b8,
+// signals +0x1c0 when it has submitted the frame.
+constexpr ptrdiff_t kRendererStartEvent = 0x1b8;
+constexpr ptrdiff_t kRendererDoneEvent = 0x1c0;
+
+// sMhMain's per-frame update (its vtable +0x30), which the main thread loop runs once per frame:
+// the frame timer with the limiter of the Frame Rate option (Sleep, then a QueryPerformanceCounter
+// spin), the start of the render thread on the previous frame, input polling and the simulation,
+// then the wait for the render thread and the Present of the previous frame.
+constexpr std::string_view kMainUpdatePattern =
+    "40 53 48 81 EC 80 00 00 00 48 8B D9 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? "
+    "48 8B 8B 88 F8 0A 00 48 8B 01 FF 50 48 83 BB CC 00 00 00 01";
+// sMhMouse's per-frame update (its vtable +0x30): reads the mouse through DirectInput.
+constexpr std::string_view kMouseUpdatePattern =
+    "40 53 41 57 48 83 EC 28 48 8B D9 E8 ?? ?? ?? ?? 45 33 FF 44 38 BB B2 00 00 00";
+// The render thread's loop end: SetEvent(renderer->done), then WaitForSingleObject(renderer->start).
+constexpr std::string_view kRenderThreadPattern =
+    "48 8B 0D ?? ?? ?? ?? 48 8B 89 C0 01 00 00 FF 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
+    "BA FF FF FF FF 48 8B 89 B8 01 00 00 FF 15";
 
 uint8_t** g_renderer = nullptr;
 uint8_t** g_camera = nullptr;
@@ -92,6 +122,14 @@ constexpr ptrdiff_t kTaaJitterEnable = 0x184;
 using RecomputeFn = void(__fastcall*)(void* renderer);
 RecomputeFn g_recompute = nullptr;
 
+using FrameUpdateFn = void*(__fastcall*)(void* self);
+FrameUpdateFn g_origMainUpdate = nullptr;
+FrameUpdateFn g_origMouseUpdate = nullptr;
+void (*g_frameStartCallback)() = nullptr;
+void (*g_inputCallback)() = nullptr;
+void** g_setEventImport = nullptr;
+void** g_waitImport = nullptr;
+
 // Renderer frame of the last DLSS evaluation, plus one (0 = none yet).
 std::atomic<uint64_t> g_lastDlssFrame{0};
 // Since the last JitterStats() call.
@@ -110,6 +148,7 @@ struct HookSettings {
     std::atomic<bool> debugFixedJitter{false};
     std::atomic<float> debugJitterX{0.0f};
     std::atomic<float> debugJitterY{0.0f};
+    std::atomic<bool> reflectionFix{true};
 };
 HookSettings g_settings;
 // Until the NGX side is installed the hooks only call the game's functions.
@@ -338,6 +377,62 @@ void HoldTaaOnly() {
     }
 }
 
+// The scene's mSSLRGBufferJitter switch (scene + g_sceneSslrJitter, on in the game) picks the
+// "_GJitter" versions of the screen-space reflection passes (classify, trace, resolve). Their
+// resolve fetches each pixel's reflection history from a neighbour inside its aligned 2x2 block,
+// a different one every frame in a four-frame cycle (from the frame counter), and the next pass
+// keeps 99.99% of that history (clamped to the neighbours). That spreads the history over each
+// 2x2 block of render pixels: the reflections get nearly constant per block and change every
+// frame. Measured: inside a block, neighbouring pixels of the history differ by a third of what
+// they differ by across a block border. The game's TAA at native resolution hid it; DLSS scales
+// the blocks up instead (4x4 screen pixels in Performance) and its input changes twice as much
+// between frames where reflections dominate. The resolve without the switch is the same shader
+// without that fetch offset, so the switch is held off while DLSS runs (developer key
+// ReflectionFix, on by default).
+ptrdiff_t g_sceneSslrJitter = 0;
+std::mutex g_sslrMutex;
+uint8_t* g_sslrScene = nullptr;
+bool g_sslrHeld = false;
+uint8_t g_sslrGame = 1;  // the game's own value, last seen
+bool g_sslrOurs = false; // the byte still holds the plugin's 0 (the game has not set it since)
+bool g_sslrLogged = false;
+
+void HoldReflectionJitterOff() {
+    uint8_t* scene = g_scene ? *g_scene : nullptr;
+    if (!scene || !g_sceneSslrJitter) return;
+    std::lock_guard lock(g_sslrMutex);
+    if (scene != g_sslrScene) {
+        g_sslrScene = scene;
+        g_sslrHeld = false;
+        g_sslrOurs = false;
+        g_sslrLogged = false;
+    }
+    auto* flag = reinterpret_cast<volatile uint8_t*>(scene + g_sceneSslrJitter);
+    uint8_t current = *flag;
+    if (current != 0) g_sslrOurs = false;  // the game has set it since
+    if (g_settings.reflectionFix && DlssEnabledInGame() && !Bypassed() && !g_dlssUnavailable) {
+        if (current != 0) {
+            // Once per hold: the game sets the switch when the scene starts, maybe after the hold began.
+            if (!g_sslrLogged) LOGI("reflections: the game's 2x2 reflection filter is off while DLSS runs");
+            g_sslrLogged = true;
+            g_sslrGame = current;
+            *flag = 0;
+            g_sslrOurs = true;
+        } else if (!g_sslrHeld && !g_sslrOurs) {
+            g_sslrGame = 0;  // off is the game's own setting
+        }
+        g_sslrHeld = true;
+    } else if (g_sslrHeld) {
+        g_sslrHeld = false;
+        g_sslrLogged = false;
+        if (g_sslrOurs && g_sslrGame != 0) {
+            *flag = g_sslrGame;
+            LOGI("reflections: back to the game's filter");
+        }
+        g_sslrOurs = false;
+    }
+}
+
 // The pass can be built on two threads at once for the same filter, so the TAA sharpen flag is
 // cleared by the first build that starts and restored by the last one that ends.
 struct SharpenHold {
@@ -387,6 +482,7 @@ void* __fastcall HookTaaUpdate(void* self) {
     if (!g_active) return g_origTaaUpdate(self);
     if (g_updateCallback) g_updateCallback();
     HoldTaaOnly();
+    HoldReflectionJitterOff();
     if (!DlssEnabledInGame() || Bypassed()) return g_origTaaUpdate(self);
     auto* taa = static_cast<uint8_t*>(self);
     auto* enable = taa + kTaaJitterEnable;
@@ -428,6 +524,43 @@ void* __fastcall HookTaaDraw(void* self, void* drawContext) {
 uint8_t* ExeBase() { return reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)); }
 
 uintptr_t Rva(const void* p) { return static_cast<uintptr_t>(static_cast<const uint8_t*>(p) - ExeBase()); }
+
+void* __fastcall HookMainUpdate(void* self) {
+    if (g_active && g_frameStartCallback) g_frameStartCallback();
+    return g_origMainUpdate(self);
+}
+
+void* __fastcall HookMouseUpdate(void* self) {
+    if (g_active && g_inputCallback) g_inputCallback();
+    return g_origMouseUpdate(self);
+}
+
+// The only .rdata slot pointing at `fn` (a vtable entry), or null when there is none or several.
+void** UniqueSlotOf(const mem::Section& rdata, const void* fn) {
+    void** found = nullptr;
+    for (auto* p = reinterpret_cast<void**>(rdata.begin); p + 1 <= reinterpret_cast<void**>(rdata.end); ++p) {
+        if (*p != fn) continue;
+        if (found) return nullptr;
+        found = p;
+    }
+    return found;
+}
+
+// Hooks a per-frame update through its vtable slot. Returns false when the function or its slot is
+// not found; the plugin then runs without it.
+bool HookFrameUpdate(const mem::Section& text, const mem::Section& rdata, std::string_view pattern,
+                     const char* name, void* hook, FrameUpdateFn& original) {
+    auto matches = mem::FindPattern(text, pattern);
+    void** slot = matches.size() == 1 ? UniqueSlotOf(rdata, matches[0]) : nullptr;
+    if (!slot) {
+        LOGW("game: {} not found ({} matches); NVIDIA Reflex works without it", name, matches.size());
+        return false;
+    }
+    original = reinterpret_cast<FrameUpdateFn>(*slot);
+    mem::WritePointer(slot, hook);
+    LOGI("game: {} +{:#x} hooked through vtable slot +{:#x}", name, Rva(matches[0]), Rva(slot));
+    return true;
+}
 
 }  // namespace
 
@@ -501,6 +634,16 @@ bool Init() {
              aaSetter.size());
     }
 
+    auto sslrSelect = mem::FindPattern(*text, kSslrResolveSelectPattern);
+    if (sslrSelect.size() == 1) {
+        int32_t offset;
+        std::memcpy(&offset, sslrSelect[0] + kSslrGBufferJitterDisp, sizeof(offset));
+        g_sceneSslrJitter = offset;
+        LOGI("game: reflection filter switch at scene +{:#x} (+{:#x})", offset, Rva(sslrSelect[0]));
+    } else {
+        LOGW("game: reflection technique choice matched {} times; ReflectionFix has no effect", sslrSelect.size());
+    }
+
     auto apiFlag = mem::FindPattern(*text, kApiFlagPattern);
     if (apiFlag.size() == 1) {
         g_apiFlag = mem::RipTarget(apiFlag[0] + 0x13, apiFlag[0] + 0x17);
@@ -518,6 +661,22 @@ bool Init() {
         g_operatorNew = reinterpret_cast<OperatorNewFn>(opNew[0]);
     } else {
         LOGW("game: operator new matched {} times", opNew.size());
+    }
+
+    // For NVIDIA Reflex: the start of each frame, the input poll and the render thread's events.
+    HookFrameUpdate(*text, *rdata, kMainUpdatePattern, "frame update", reinterpret_cast<void*>(&HookMainUpdate),
+                    g_origMainUpdate);
+    HookFrameUpdate(*text, *rdata, kMouseUpdatePattern, "mouse update", reinterpret_cast<void*>(&HookMouseUpdate),
+                    g_origMouseUpdate);
+    auto renderThread = mem::FindPattern(*text, kRenderThreadPattern);
+    if (renderThread.size() == 1 &&
+        mem::RipTarget(renderThread[0] + 3, renderThread[0] + 7) == reinterpret_cast<uint8_t*>(g_renderer)) {
+        g_setEventImport = reinterpret_cast<void**>(mem::RipTarget(renderThread[0] + 16, renderThread[0] + 20));
+        g_waitImport = reinterpret_cast<void**>(mem::RipTarget(renderThread[0] + 41, renderThread[0] + 45));
+        LOGI("game: render thread loop at +{:#x}, SetEvent import +{:#x}, WaitForSingleObject import +{:#x}",
+             Rva(renderThread[0]), Rva(g_setEventImport), Rva(g_waitImport));
+    } else {
+        LOGW("game: render thread loop matched {} times", renderThread.size());
     }
     return true;
 }
@@ -539,6 +698,29 @@ void SetFrameCallback(void (*callback)()) { g_frameCallback = callback; }
 
 void SetUpdateCallback(void (*callback)()) { g_updateCallback = callback; }
 
+void SetFrameStartCallback(void (*callback)()) { g_frameStartCallback = callback; }
+
+void SetInputCallback(void (*callback)()) { g_inputCallback = callback; }
+
+void* SwapChain() {
+    uint8_t* device = Device();
+    auto dx12 = IsDx12();
+    if (!device || !dx12) return nullptr;
+    if (mem::SafeRead<uint32_t>(device + kDeviceSwapChainCount).value_or(0) == 0) return nullptr;
+    return mem::SafeRead<void*>(device + (*dx12 ? kDeviceSwapChain12 : kDeviceSwapChain11)).value_or(nullptr);
+}
+
+RenderEvents RenderThreadEvents() {
+    uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
+    if (!renderer) return {};
+    return {mem::SafeRead<void*>(renderer + kRendererStartEvent).value_or(nullptr),
+            mem::SafeRead<void*>(renderer + kRendererDoneEvent).value_or(nullptr)};
+}
+
+void** SetEventImport() { return g_setEventImport; }
+
+void** WaitForSingleObjectImport() { return g_waitImport; }
+
 void ApplyConfig(const Config& config) {
     g_settings.bypass = config.bypass;
     g_settings.forceJitter = config.forceJitter;
@@ -547,6 +729,7 @@ void ApplyConfig(const Config& config) {
     g_settings.debugFixedJitter = config.debugFixedJitter;
     g_settings.debugJitterX = config.debugJitterX;
     g_settings.debugJitterY = config.debugJitterY;
+    g_settings.reflectionFix = config.reflectionFix;
 }
 
 void Activate(const Config& config) {

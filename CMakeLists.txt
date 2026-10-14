@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MHW-DLSS4 VERSION 0.8.2 LANGUAGES CXX)
+project(MHW-DLSS4 VERSION 0.9.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,6 +56,7 @@ add_library(MHW-DLSS4 SHARED
   src/ngx_params.cpp
   src/ngx_shim.cpp
   src/probe.cpp
+  src/reflex.cpp
   src/sharpen.cpp
   "${SHADER_DIR}/nis_hdr_cs.h"
   "${SHADER_DIR}/nis_sdr_cs.h"
@@ -64,7 +65,8 @@ add_library(MHW-DLSS4 SHARED
   "${SHADER_DIR}/rcas_cs.h"
 )
 
-target_include_directories(MHW-DLSS4 PRIVATE src "${DLSS_SDK_DIR}/include" "${NIS_DIR}" "${SHADER_DIR}")
+target_include_directories(MHW-DLSS4 PRIVATE src "${DLSS_SDK_DIR}/include" "${NIS_DIR}" "${SHADER_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nvapi")
 target_compile_definitions(MHW-DLSS4 PRIVATE
   WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS
   MHW_DLSS4_VERSION="${PROJECT_VERSION}"

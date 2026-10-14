@@ -1,5 +1,6 @@
 # Build output and packages
 /build/
+/build-capture/
 /dist/
 /.cache/
 __pycache__/

@@ -40,12 +40,177 @@ its application id. The plugin is loaded later (with the input system) and:
 9. Keeps D3D12 textures and DLSS features it replaces alive for 16 game frames before freeing
    them. D3D12 frees resources immediately, even while queued GPU work still uses them, which
    crashed the GPU when the render resolution changed while the game was running.
+10. Adds NVIDIA Reflex (see below), independent of DLSS.
+11. Switches the game's screen-space reflections to the version of their temporal filter that
+    does not work in 2x2 pixel blocks while DLSS runs (see [Reflections](#reflections)).
 
 The game builds the TAA pass on worker threads, twice per frame and at the same time, and runs
 the TAA update once per frame on the main thread. The plugin reloads its ini and asks the game to
 recompute the render scale from that update (where the game applies graphics options itself),
 outside the lock the render thread takes for DLSS. The hooks only act once the NGX side is
 installed.
+
+## NVIDIA Reflex and input lag
+
+The game's main thread runs one frame per update of its main object (`sMhMain`, exe `+0x1af2b60`,
+called through its vtable):
+
+1. the frame timer with the limiter of the Frame Rate option (`+0x225f9f0`: `Sleep`, then a
+   `QueryPerformanceCounter` spin);
+2. the start of the render thread on the previous frame (`SetEvent` on the renderer's start event);
+3. input polling (the mouse through DirectInput in `sMhMouse`'s update) and the simulation;
+4. the wait for the render thread; then the previous frame's command lists go to the graphics card
+   and that frame is presented.
+
+A frame is therefore presented one update after its input was read, and anything that waits on the
+main thread (a frame rate limiter, or Reflex's sleep) waits inside some frame's time from input to
+screen: a frame rate cap costs about one frame interval of input lag wherever it sleeps.
+
+The plugin uses NVAPI from the driver's `nvapi64.dll` through `nvapi_QueryInterface` (nothing is
+linked; the declarations are in `third_party/nvapi/nvapi_reflex.h`):
+
+- `NvAPI_D3D_SetSleepMode` with the ini settings: low latency mode, boost, `minimumIntervalUs` for
+  `FrameLimit`, markers used for optimisation.
+- `NvAPI_D3D_Sleep` at the start of the update, then `SIMULATION_START`. The update is hooked through
+  `sMhMain`'s vtable slot (`+0x33fa9e8`).
+- `INPUT_SAMPLE` when `sMhMouse`'s update runs (its vtable slot `+0x2f86e78`).
+- `RENDERSUBMIT_START` and `_END` when the main thread starts the render thread and when the render
+  thread reports that it is done, through the exe's `SetEvent` import; `SIMULATION_END` when the main
+  thread starts waiting for the render thread (`WaitForSingleObject` import). Both imports are found
+  from the render thread's loop (`+0x229ac88`).
+- `PRESENT_START` and `_END` around the swap chain's Present (slot 8 of its vtable). The game keeps
+  the swap chain in its device object at `+0x1470` (D3D12) or `+0x1488` (D3D11). The render and
+  present markers carry the id of the frame simulated one update earlier.
+
+NVAPI gets the D3D device from the swap chain. Under ReShade, the D3D12 swap chain hands out the
+device itself instead of its command queue, so both are tried.
+
+### Measurements
+
+With `LatencyStats=1`, the plugin logs NVIDIA's latency report every 5 seconds (averages over the
+last 64 frames); `tools/live/latencytest.ps1` switches ini settings in the running game and collects
+the reports. Title screen, D3D12, 2560x1440, DLAA, RTX 4080 SUPER, time from the input poll until
+the graphics card has finished the frame:
+
+| Setting | Frame interval | Input to GPU done |
+| --- | --- | --- |
+| No cap, `LowLatency=Off` (no Sleep calls) | 6.1 ms | 14.6 to 14.9 ms |
+| No cap, `LowLatency=On` | 5.8 ms | 13.9 to 14.4 ms |
+| No cap, `LowLatency=Boost` | 5.8 ms | 12.5 to 12.6 ms |
+| The game's Frame Rate option at 60 | 16.67 ms | 23.9 to 25.9 ms |
+| `FrameLimit=60` | 16.67 ms | 23.5 to 23.8 ms |
+| Reflex frame limit 60 without Sleep calls (the driver then waits inside Present) | 16.67 ms | 33.2 ms |
+| Performance mode, the game's Frame Rate at 60 | 16.67 ms | 20.7 ms |
+| NVIDIA DLSS off in the game (no anti-aliasing), no cap | 5.5 ms | 15.2 ms |
+
+In the game world (Astera), `tools/live/latencymatrix.ps1` with `tools/live/mhwharness.py` (key press
+by `SendInput`, then the player position read until it moves; 15 to 25 tries each). The game reads the
+key at the start of the next frame and moves the player one frame later; "read to GPU done" is the
+plugin's report for that frame. Medians, DLAA, RTX 4080 SUPER:
+
+| Setup | Cap | Frame interval | Key to read | Key to player moved | Read to GPU done |
+| --- | --- | --- | --- | --- | --- |
+| user's mods, D3D12 | none | 7.2 ms | 4.2 to 5.8 ms | 11.7 to 13.3 ms | 17.5 to 19.1 ms |
+| user's mods, D3D12 | game 60 | 16.7 ms | 8.7 to 12.2 | 25.5 to 29.0 | 26.8 to 26.9 |
+| user's mods, D3D12 | `FrameLimit=60` | 16.7 ms | 8.0 | 24.8 | 26.9 |
+| user's mods, D3D12 | driver 60, no Reflex sleep | 16.7 ms | 9.8 to 12.7 | 26.7 to 29.6 | 33.2 |
+| user's mods, D3D12 | driver 60, Reflex sleep | 16.7 ms | 10.3 to 12.3 | 27.1 to 29.2 | 26.8 to 26.9 |
+| only Stracker's Loader, D3D12 | none | 6.6 ms | 5.8 to 6.3 | 12.5 to 13.3 | 17.4 to 17.7 |
+| only Stracker's Loader, D3D12 | game 60 | 16.7 ms | 8.2 to 13.1 | 25.0 to 29.9 | 26.4 |
+| only Stracker's Loader, D3D12 | driver 60, no Reflex sleep | 16.7 ms | 6.7 to 13.1 | 23.5 to 29.9 | 33.2 |
+| only Stracker's Loader, D3D12 | driver 60, Reflex sleep | 16.7 ms | 12.6 | 29.5 | 26.3 |
+| only Stracker's Loader, D3D12 | game 144, driver 144 or `FrameLimit=144` | 6.9 ms | 5.6 to 6.6 | 12.7 to 13.7 | 16.5 to 16.7 |
+| only Stracker's Loader, D3D11 | game 60 or driver 60 | 16.7 ms | 8.2 to 11.3 | 25.2 to 28.2 | 24.0 to 24.3 |
+| only Stracker's Loader, D3D11 | none | 7.5 ms | 6.3 to 7.2 | 14.2 to 14.9 | 17.7 |
+
+"Only Stracker's Loader" means MHW-DLSS4 and MHW-SteamOffline (for the harness) were the only other
+mods; ReShade, SharpPluginLoader, Fix-orld, BetterInputs and DPSTickFix were removed. The key-to-read
+time is the wait for the next frame (half a frame interval on average), so its spread between runs is
+sampling noise; the read-to-GPU-done time is not. The game's own cap was never worse than the others;
+the driver's cap without Reflex's sleep was 6.8 ms worse in D3D12 and the same in D3D11. Close to the
+GPU limit (cap 144 at about 152 fps uncapped) all caps measured the same.
+
+D3D11 at the title: 16.0 ms without Sleep calls, 15.7 On, 15.2 Boost, 23.6 with `FrameLimit=60`. With and without
+a mod that sets the swap chain's maximum frame latency to 1 the numbers were the same: the game's
+swap chain already has a maximum frame latency of 1, so frames hardly queue up.
+
+- Low latency mode gains little in this game; Boost about 2 ms through higher GPU clocks.
+- The game's limiter sleeps before the input poll (the input is read 14 to 15 ms into the frame),
+  where Reflex sleeps too, and both caps cost the same. The spread of the intervals between Presents
+  was 0.1 to 0.2 ms for every cap.
+- Without the game's Sleep call the driver's frame limit waits inside Present, 9.7 ms more at 60 fps.
+  NVIDIA documents that the driver's Max Frame Rate setting sleeps in `NvAPI_D3D_Sleep` when the game
+  calls it; with `LowLatency=On` the Control Panel's 240 fps cap of the test machine moved its wait
+  out of Present (Present took 0.3 ms instead of 1.5 ms without Sleep calls). The Control Panel cap
+  at 60 fps itself was not measured.
+- Sleeping right after the render thread start instead of at the start of the update was no better,
+  and with Boost it halved the frame rate to 30 fps.
+- DLSS adds no measurable input lag: with DLSS off the game was as fast as with DLAA, and Performance
+  mode lowers the lag along with the GPU time (3 ms instead of 6).
+- The driver reported low latency mode on even with `LowLatency=Off` once Sleep was called; the test
+  machine's Control Panel has Low Latency Mode on (maximum pre-rendered frames 1).
+
+## Reflections
+
+Found with RenderDoc captures of the hub (see [Graphics debugging](#graphics-debugging)); the game's
+shaders carry their resource and constant names. With ScreenSpaceReflection on, the environment
+reflections (cube map and screen-space reflections together) go through these passes, all at render
+resolution unless noted:
+
+1. Classify and trace (`SSLR_Classify`, `SSLR_Trace_Accurate`): rays traced at half the render
+   resolution (`fSSLRScale` 0.5; the reflection object's constructor at `+0x25924d0` sets level 1
+   and scale 0.5, so the `_FULL_RES` techniques never run).
+2. Resolve (`SSLR_Resolve*`, compute): four random samples of the trace per pixel, a new pattern
+   every frame (seeded with `iRenderFrame`), plus the cube map; writes the new reflection and the
+   previous result fetched through the motion vectors.
+3. Blend (`CBGlobalIllumination`): clamps that previous result to the range of the four neighbours
+   of the new one and keeps 99.99% of it (`fSpecularTemporalBlendRate` 0.9999); the result is added
+   to the scene and kept for the next frame.
+
+The scene's `mSSLRGBufferJitter` switch (scene `+0xb440`, on in the game) picks the `_GJitter`
+techniques. Their resolve differs from the plain one only by an offset of the history fetch: each
+pixel reads the history of a neighbour inside its aligned 2x2 block, a different one every frame
+(none, diagonal, horizontal, vertical, from `iRenderFrame`). With the 99.99% blend that spreads the
+history over each 2x2 block of render pixels. The game's TAA at native resolution hid it. Measured:
+
+- In the history (native capture), neighbouring pixels inside a 2x2 block differ by a third of what
+  they differ by across a block border; the new reflection of the same frame has no such pattern.
+- DLSS Performance output (1440p, hub): in places where reflections are most of the light, pixel
+  differences across 4x4-pixel borders are 6-12% above the average and inside the blocks below it.
+  Turning the switch off at run time removed that, turning it on brought it back; with
+  ScreenSpaceReflection off it is not there either.
+- DLSS input with a fixed jitter and a still camera (Performance): where reflections dominate, the
+  change from one frame to the next is about twice as large with the switch on (0.030-0.033 against
+  0.014-0.019 of the pixel value). In DLAA the measured area held fewer reflections (0.042 against
+  0.037-0.041).
+
+So while DLSS runs, the plugin holds the switch at 0 from the TAA update (like the anti-aliasing
+hold) and gives the game's value back when it stops, with Bypass in DLAA and when NGX is not
+available. The developer key `ReflectionFix=0` turns the hold off for comparisons. The user
+confirmed the fix in the hub and saw no performance cost. The offset of the switch is read from
+the technique choice in `+0x2286260` (pattern `kSslrResolveSelectPattern`).
+`tools/live/sslrpeek.py` reads and sets it in the running game.
+
+## Graphics debugging
+
+The game exe restarts itself through Steam when it is started directly (Steam DRM), so launchers of
+graphics debuggers lose it. `tools/capture/` loads RenderDoc from inside the game instead:
+
+- `MHW-Capture.dll` (`cmake -S tools/capture -B build-capture -G Ninja`, needs RenderDoc installed
+  for `renderdoc_app.h`) goes into `nativePC\plugins`. With SharpPluginLoader's early load the
+  plugin folder is loaded before the renderer, so RenderDoc hooks the device. `echo 1 >
+  nativePC\plugins\MHW-Capture.trigger` captures the next frame into `nativePC\plugins\MHW-Capture\`.
+  Under RenderDoc the game's NGX setup fails (the plugin logs "DLSS was refused by the NGX 1.x
+  core"), so the game runs without DLSS and writes `NVIDIA DLSS=Off` into graphics_option.ini (put
+  it back afterwards). The capture shows the game's own pipeline at native resolution, which is
+  what the passes above were read from.
+- `rdq.py --start CAPTURE.rdc` keeps a capture open in qrenderdoc's embedded Python
+  (`rdserver.py`; RenderDoc's first-run analytics prompt has to be answered or switched off in
+  `%APPDATA%\qrenderdoc\UI.config` first) and `rdq.py SCRIPT.py` runs scripts against it: actions,
+  pipeline state with the shaders' resource names, disassembly, constant buffers, texture data
+  (`texio.py` reads the dumps into numpy).
+- Nsight Graphics 2026.3 is installed too. Its `ngfx-capture` can capture NGX and DLSS, but its
+  captures need the GUI to inspect; the same Steam DRM restart applies to launching through it.
 
 ## Conventions
 
@@ -78,6 +243,7 @@ first group in them.
 | `JitterScaleX/Y` | 0.5 / -0.5 | Scale from the camera jitter to the DLSS jitter offset (times render scale). |
 | `ForceJitter` | 1 | Keep the camera jitter on while DLSS runs (some scenes switch it off). |
 | `FullPixelJitter` | 1 | Widen the game's half-pixel jitter to a full render pixel while DLSS runs. |
+| `ReflectionFix` | 1 | Hold the game's 2x2 reflection history swap off while DLSS runs (see [Reflections](#reflections)); 0 = the game's reflections, for comparisons. |
 | `HDR` | -1 | DLSS IsHDR flag: -1 from the game, 0 or 1 forced. |
 | `ExposureScale`, `PreExposure` | 1 | Passed to DLSS evaluate as is. |
 | `NGXLogging` | 0 | NGX's own log lines in `MHW-DLSS4.log`. |
@@ -86,6 +252,9 @@ first group in them.
 | `DebugDumpFrames`, `DebugDumpDelay` | 0, 5 | D3D12: dump N frames of colour, motion, depth and jitter to `MHW-DLSS4\`, starting the given seconds after the reload. |
 | `DebugDumpOutput` | 0 | D3D11: write one DLSS output frame to `MHW-DLSS4\output.bin`. |
 | `DebugFixedJitter`, `DebugJitterX/Y` | 0 | Replace the camera jitter with a constant (camera units). |
+| `LatencyStats` | 0 | Log NVIDIA's latency report every 5 seconds (Reflex markers; works with `LowLatency=Off` too). |
+| `FrameLimit` | 0 | Frame rate cap through Reflex (`minimumIntervalUs`), fps; 0 = none. Measured to add the same input lag as the game's Frame Rate option and the driver's Max Frame Rate with `LowLatency` on, so it is a measurement tool, not a player setting (it was one in the 0.9.0 working copy). |
+| `ReflexSleep` | 1 | 0 = set the markers and the sleep mode but never call `NvAPI_D3D_Sleep`, to compare where the driver waits. |
 
 ## Building
 
@@ -99,6 +268,8 @@ Visual Studio 2022 or newer (MSVC), CMake 3.24+, Ninja, and `fxc` from the Windo
   `third_party/nis/licence.txt`).
 - `src/shaders/rcas.hlsl` is adapted from AMD FidelityFX Super Resolution 1.0 (MIT licence,
   `third_party/amd_fsr/licence.txt`).
+- `third_party/nvapi/nvapi_reflex.h` holds the Reflex part of NVIDIA's NVAPI headers
+  (https://github.com/NVIDIA/nvapi, MIT licence, `third_party/nvapi/licence.txt`).
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

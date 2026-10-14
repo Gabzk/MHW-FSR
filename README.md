@@ -17,6 +17,7 @@ The game shipped with DLSS 1, which looks soft and smeary. This plugin runs curr
 - **Quality / Balanced / Performance / Custom**: lower render resolution, DLSS scales up to the
   output resolution.
 - Three sharpening filters after DLSS, set in the ini: NVIDIA's **NVSharpen** (default), **Vanilla**, or AMD's **RCAS**.
+- **NVIDIA Reflex**, with or without DLSS.
 - **DX12**, **DX11** and **HDR** are supported.
 
 ## Requirements
@@ -51,6 +52,7 @@ You can edit `nativePC\plugins\MHW-DLSS4.ini` while the game runs; changes apply
 | `DLLPath` | folder or file | The `nvngx_dlss.dll` to use. Empty (default): the one the driver has. See [Using a specific DLSS version](#using-a-specific-dlss-version). Read when the game starts. |
 | `AutoExposure` | 0 / 1 | Let DLSS estimate exposure (presets L and M always do). |
 | `Bypass` | 0 / 1 | DLAA mode only: show the game's TAA for comparison. |
+| `LowLatency` | `Off`, `On`, `Boost` | NVIDIA Reflex, see [below](#nvidia-reflex-and-frame-rate-caps). |
 | `LogLevel` | `Debug`, `Info`, `Warn`, `Error` | How much goes into `MHW-DLSS4.log` next to the plugin. |
 
 Ini files from 0.8.1 and older also have an `[Advanced]` section: settings measured for this game,
@@ -90,6 +92,26 @@ NVSharpen or RCAS, 0.5 with Vanilla.
 
 Fun fact: in the original game the DLSS Sharpness slider did nothing at all. The old DLSS only
 started sharpening above 1, and the slider stops at 1.
+
+### NVIDIA Reflex and frame rate caps
+
+The plugin adds NVIDIA Reflex to the game. It needs an NVIDIA graphics card and works with NVIDIA
+DLSS on or off.
+
+- `LowLatency=On` (default) lets the driver start each frame just in time for the graphics card.
+  The game already keeps few finished frames waiting, so the gain is small: about half a
+  millisecond in our tests. `Boost` also keeps the graphics card at full clock speed, for about
+  2 ms less input lag and more power use.
+- A frame rate cap adds input lag in this game, whichever limiter you use: the game shows a frame
+  one update after it reads your input, and every update waits for the cap. In our tests (RTX 4080
+  SUPER, 1440p, DLAA) the time from the mouse to the finished frame was about 15 ms at 165 fps
+  without a cap and about 24 ms at 60 fps.
+- Cap with the game's own Frame Rate option or with Max Frame Rate in the NVIDIA Control Panel or
+  NVIDIA App; both add the same input lag as long as `LowLatency` is on. Reflex lets the driver's
+  cap wait at the start of the frame; without it the driver waits later in the frame, which cost
+  about 7 ms more at 60 fps in our tests.
+- DLSS itself adds no input lag: DLAA measured the same as DLSS off, and the upscaling modes lower
+  it, because the graphics card finishes each frame sooner.
 
 ## Using a specific DLSS version
 

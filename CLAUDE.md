@@ -2,7 +2,7 @@
 
 DLSS 4 for Monster Hunter: World (Iceborne, game version 15.2x, tested on 15.23), as a native
 plugin DLL loaded by Stracker's Loader from `nativePC\plugins`. C++20, MSVC, CMake + Ninja.
-Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.8.2 at the time of writing).
+Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.9.1 at the time of writing).
 Releases are git tags (`v0.8.2`) with the zip attached as a GitHub release; the repo is private on
 GitHub (`odt1/MHW-DLSS4`). Licence: BSD-2-Clause (`LICENSE`, "Copyright (c) 2026, odt1"), for the
 project's own code. No copyleft code or licence: the DLSS SDK licence (4e) forbids using the SDK in a
@@ -32,15 +32,19 @@ src/                  the plugin
   ngx_params.cpp/.h   the NVSDK_NGX_Parameter object handed to the game
   dlss_dll.cpp/.h     which nvngx_dlss.dll to use (driver store / DLLPath / MHW-DLSS4 folder)
   sharpen.cpp/.h      NVSharpen / Vanilla / RCAS compute passes after DLSS (D3D11 + D3D12)
+  reflex.cpp/.h       NVIDIA Reflex through NVAPI: sleep mode, Sleep at the frame start, latency
+                      markers, latency report (LatencyStats)
   d3d_util.cpp/.h     texture info, mirror copies, rect copies, D3D12 retire queue, debug dumps
   probe.cpp/.h        DebugProbe / DebugDumpFrames (D3D12 only)
   config.cpp/.h       MHW-DLSS4.ini (default text = kDefaultIni) and graphics_option.ini reading
   crash.cpp, log.cpp, memory.cpp (pattern scan, SafeRead, WritePointer)
   shaders/            nis_sharpen.hlsl, vanilla_sharpen.hlsl, rcas.hlsl (fxc at build time)
-third_party/          NIS SDK v1.0.3 (MIT), AMD FSR licence, DLSS SDK (not committed, see its README)
+third_party/          NIS SDK v1.0.3 (MIT), AMD FSR licence, DLSS SDK (not committed, see its README),
+                      nvapi/nvapi_reflex.h (Reflex subset of NVAPI, MIT; sizes checked against nvapi.h)
 tools/                build/deploy/package scripts and measurement tools (index below)
   re/                 static RE helpers for the unpacked game exe
   live/               scripts that read/poke the running game or drive test runs
+  capture/            graphics debugging: MHW-Capture.dll (RenderDoc from inside the game), rdq.py
 images/               before/after comparisons used by README.md
 ```
 
@@ -59,7 +63,7 @@ pwsh:  . $PROFILE; devshell; cmake --build build
 tools\deploy.ps1       copies build\MHW-DLSS4.dll + .pdb into the game (game must be closed)
 tools\package.ps1      dist\MHW-DLSS4-<version>.zip: DLL, default ini (extracted from kDefaultIni in
                        config.cpp), README as MHW-DLSS4-README.md, LICENSE as
-                       MHW-DLSS4-LICENSE.txt, THIRD-PARTY notices
+                       MHW-DLSS4-LICENSE.txt, THIRD-PARTY notices (NIS, FSR, NVAPI, DLSS SDK)
 ```
 
 Bump the version in `CMakeLists.txt` for every release. The zip has no `nvngx_dlss.dll` unless
@@ -102,6 +106,15 @@ Before changing source, keep a copy of the last released `src/`
   plugin did not reload. The packaged ini has LF line endings, the scripts keep whichever is there.
   `bypasstest.py [switches]` checks the AA give-back with Bypass and VRAM across switches;
   `bypassupscale.py` checks that Bypass in Performance keeps the hold and DLISP running.
+- Latency: `LatencyStats=1` ([Advanced]) logs NVIDIA's latency report every 5 s;
+  `tools\live\latencytest.ps1 -Variants 'LowLatency=Off;ReflexSleep=0', 'LowLatency=On', ...` sets
+  keys in the running game and prints one report per variant. Caps of the game's Frame Rate option
+  need a restart with `FrameRate=60` in graphics_option.ini (restore it afterwards). The test
+  machine's NVIDIA profile (global; test changes to the game's profile are reported to the user and
+  deleted again with `nvprofile.py delete frl`): global Max Frame Rate 240 and
+  Low Latency Mode On (pre-rendered frames 1), so light scenes run at 240 fps and the driver always
+  reports low latency mode on once Sleep is called.
+- Launching the game rotates the logs of the other plugins too (MonsterHunterFixorld.log and .prev).
 - Python: plain `python` has no numpy; use `uv run --quiet --with numpy --with pillow python -I x.py`
   (`--with capstone` for the RE scripts). In Git Bash heredocs `\\` collapses to `\`: write scripts
   with the Write tool instead.
@@ -177,6 +190,32 @@ Before changing source, keep a copy of the last released `src/`
     sharpen state stay retired. Freeing at once faulted the GPU (nvlddmkm 153, ERR12) on run-time
     Mode switches. NGX accepts a new feature while the old one still exists. D3D11 releases stay
     immediate. The motion/depth mirrors are retired as soon as the TAA position runs in DLAA.
+12. **NVIDIA Reflex (0.9.0).** `reflex.cpp`, independent of DLSS. NVAPI through
+    `nvapi_QueryInterface` (nvapi64.dll from System32). Once the game's swap chain exists (device
+    +0x1470 D3D12 / +0x1488 D3D11), the plugin hooks its Present (vtable slot 8; under ReShade that is
+    ReShade's proxy vtable, whose Present slot Fixorld had already patched, so the hooks chain) and
+    the exe's SetEvent and WaitForSingleObject imports, and gets the D3D device from the swap chain
+    (ReShade's D3D12 proxy returns the device for `GetDevice(ID3D12Device)`, real DXGI only the
+    queue: both are tried). `NvAPI_D3D_Sleep` + SIMULATION_START at the sMhMain update hook,
+    INPUT_SAMPLE at the mouse update, RENDERSUBMIT_START at SetEvent(start), RENDERSUBMIT_END at
+    SetEvent(done) on the render thread, SIMULATION_END at the main thread's first wait on the done
+    event, PRESENT around Present; render and present ids trail the simulation's by one frame (see
+    the frame pipeline below). Settings: `[Reflex] LowLatency=Off|On|Boost` (default On); developer
+    keys `FrameLimit` (fps, `minimumIntervalUs`; the user dropped it from the player ini because the
+    game's and the driver's caps measured the same), `LatencyStats`, `ReflexSleep`; with LowLatency
+    Off, no FrameLimit and `LatencyStats=0` no NVAPI call
+    is made. Measurements are in docs/technical.md.
+13. **Reflection fix (0.9.1).** `HoldReflectionJitterOff` (game.cpp, from the TAA update like the AA
+    hold) keeps the scene's `mSSLRGBufferJitter` byte (+0xb440) at 0 while DLSS runs
+    (developer key `ReflectionFix`, default 1, not in the default ini: the user asked for it to be a
+    debug flag after confirming the fix and no performance cost) and gives the game's value back
+    when the hold ends (Bypass in DLAA, NGX unavailable, DLSS off, key 0). On, the game uses the `_GJitter` screen-space reflection
+    techniques, whose resolve fetches each pixel's reflection history from a neighbour inside its
+    aligned 2x2 block (4-frame cycle from `iRenderFrame`); with the 99.99% history blend the
+    reflections end up nearly constant per 2x2 render-pixel block and change every frame. DLSS
+    scales that up (4x4 screen pixels in Performance): the "pixelated, shimmering" weapon/metal
+    reflections. The plain resolve is the same shader without the fetch offset (RenderDoc diff), so
+    no shader is replaced. Measurements in docs/technical.md (Reflections).
 
 ### Threads (0.7.3)
 
@@ -185,11 +224,15 @@ Before changing source, keep a copy of the last released `src/`
   only re-patches the NGX table, adopts the context and attaches DLISP, all under the shim mutex.
   The depth-view alias uses a compare-exchange, and the TAA sharpen flag is cleared by the first
   concurrent build and restored by the last (`SharpenGuard`).
-- The TAA update runs once per frame on the main thread, also while the TAA filter is switched off.
-  The update callback (`ngx::OnUpdate`) does the retire tick, the ini and graphics_option.ini
-  reloads (under the shim mutex) and then `RecomputeRenderScale` outside the mutex: the game's
-  recompute releases/creates DLSS features through the shim and the render thread takes the mutex
-  to evaluate. `Install` calls it outside the mutex too.
+- The TAA update runs once per frame, also while the TAA filter is switched off, as part of the
+  main thread's sMhMain update: on the main thread almost always, but 0.9.0 testing logged two ini
+  reloads from another thread (a job thread). The update callback (`ngx::OnUpdate`) does the retire
+  tick, the ini and graphics_option.ini reloads (under the shim mutex) and then
+  `RecomputeRenderScale` outside the mutex: the game's recompute releases/creates DLSS features
+  through the shim and the render thread takes the mutex to evaluate. `Install` calls it outside
+  the mutex too. `reflex::Configure` (from the reload) hands its settings over under its own mutex.
+- Reflex runs on the main thread (sMhMain update hook = frame start, mouse update, Present, the
+  main thread's SetEvent/WaitForSingleObject); the render thread only sets `RENDERSUBMIT_END`.
 - `g_config` is only replaced under the shim mutex; ngx_shim reads it under the mutex (including
   `OptimalSettingsCallback`). The game hooks read `HookSettings` atomics published by
   `game::ApplyConfig`. The log level is atomic.
@@ -249,6 +292,21 @@ from the ini file itself by `0x1404413e0`):
 - Measured before the fix (DLAA, TAA+FXAA stored): FXAA ran after DLSS (static detail -0.3%, p99
   edge change ~4/255); scene TAA 0 skipped the TAA draw and with it DLSS (plain jaggies).
 
+Screen-space reflections (SSLR, from RenderDoc captures; shader names survive in the DXBC): classify
+-> trace at half render resolution -> resolve `SSLR_Resolve[_Dither][_GJitter][_EachWaterAttn]
+[_EffectReflection][_FULL_RES]` (compute; 4 random trace samples per pixel, new pattern every frame;
+outputs the new reflection and the reprojected history) -> blend pass (`CBGlobalIllumination`:
+history clamped to the 4 neighbours of the new value, kept at `fSpecularTemporalBlendRate` 0.9999,
+added to the scene, ping-pong history). Technique choice `0x14227ec90(FULL_RES, GJitter, Dither,
+EachWaterAttn, EffectReflection)` called from `0x142286260` with scene +0xb440
+`mSSLRGBufferJitter`, +0xb43f `mSSLRDitherResolve`, +0xb43e `mGlobalEnvMapEachWaterAttn` (names from
+the property registration in `0x142270c60`; defaults set in `0x1422646f0`). FULL_RES when
+`0x1425933b0(view+0x630)` == 0: the reflection object (vtable `0x14354d9d0`, constructor
+`0x1425924d0`) has level +0x228 = 1, scale +0x238 = 0.5 hard-coded, so never; its textures are created
+from that (`mpTraceMap` +0x108, `mpResolveMap` +0x110, `mpTemporalMap` +0x118). With
+ScreenSpaceReflection=Off a per-pixel cube-map pass (`tGlobalCubeOnly`) replaces all of it, no
+history. `tools/live/sslrpeek.py` reads/sets the switches and the level.
+
 Textures: object +0x60 colour native, +0xf0 depth-view native, natives refcounted at +8, released
 by `0x142554f90` (lock xadd -1, destroy via vtable[0] at 1). Native +0x18 ID3D11 resource, +0x20
 ID3D12 resource. Draw context +0x1d0 view, view +0x628 targets, targets +0xa0 depth copy.
@@ -257,6 +315,46 @@ Game DLSS 1 details: DLISP (`nvngx_dlisp`) maps NGX "Sharpness" to clamp(0.75*(S
 the stock 0..1 slider did nothing; the game sets Sharpness only on the DLISP evaluate. The game's
 DLSS 1 call sets "MV.Scale.X/Y" = 1.0. Fatal GPU handler: `0x1423a9cf0` -> GetDeviceRemovedReason ->
 "ERR12 : Graphics device crashed." -> writes 0xdeadbeef to address 0 (`0x1421fd0c9`).
+
+Frame pipeline (observed in BN, confirmed by the Reflex markers' timing):
+- Window thread `0x1422e4670`: timeBeginPeriod(1), PeekMessage loop with `Sleep(1)`. The game's
+  main thread proc `0x1422e4ae0` loops `sub_14229b020(renderer)` (device checks) and then the main
+  object's vtable +0x30, while the window is active (else `Sleep(1)`).
+- sMhMain (vtable `0x1433fa9b8`, base sMain vtable `0x1435072f8`; instance at [`0x1451c4148`],
+  inferred from the timer fields other code reads there) update +0x30 = `0x141af2b60`: `0x14225f1d0`
+  (job sync), `0x14225f9f0` (frame timer and the Frame Rate limiter: `Sleep(ms - 1)` when 2+ ms
+  remain, then a QPC spin; +0x58 base fps, read 60.0; +0x5c target fps, read 300.0 with No Limit),
+  then `0x142293280` (render frame
+  +0x1f208++, maps per-frame buffers, sets +0x90 in flight, `SetEvent(renderer+0x1b8)` when +0x93),
+  then the systems' updates (vtable +0x30 each; sMhMouse `0x140489800` -> sMouse `0x1422e89a0` ->
+  `0x1422e9270`: GetCursorPos + DirectInput `GetDeviceState(0x14)`), then `0x1422980b0`: wait for
+  the render thread (`0x14229cbf0`, `WaitForSingleObject(+0x1c0)`), swap draw data, `0x1423a7f50`,
+  Present `0x1423aa290` (D3D12: `0x1423a9ce0` waits for the fence of the frame two back, then
+  `Present(sync, ALLOW_TEARING << 9)` on device+0x1470; D3D11 on device+0x1488).
+- Render thread proc `0x14229aba0` ("Rendering Thread", id at renderer+0x1b0): waits on +0x1b8,
+  builds and submits (`0x142293480`, `0x14229cee0`, `0x14229cd20` with "RenderingSub Thread"s),
+  `SetEvent(+0x1c0)`. Reflex markers: render thread busy ~0.5 ms; the frame's GPU work only ends
+  ~one GPU frame after its Present, i.e. the command lists reach the GPU at the end of the next
+  main thread update.
+- So frame N is presented at the end of update N+1, and a wait anywhere on the main thread lands in
+  some frame's input-to-screen time. The game's limiter (before input) and Reflex's sleep cost the
+  same; sleeping after the render thread start was no better (and halved the frame rate with Boost).
+- Frame Rate option apply `0x14043e160` (also inlined in `0x14043e220`): writes only sMain+0x5c =
+  30, 60, 90, 120, 144, 165, 240 or 300 (No Limit); constructor default 3000. sMain+0x60 (fixed
+  step at +0x58 fps, SwitchToThread spin) and +0xd0 (job threads; +0xcc > 1 selects the parallel
+  branch of the update) have only reflection setters (`0x142260240`, `0x142260280` from
+  `0x14225d5d0`).
+- Input: all polled fresh in the systems' updates after the limiter. Keyboard singleton
+  `[0x1451c53b0]` (sKeyboard vtable `0x143511f18`, sMhKeyboard `0x142f86d08`), update +0x30
+  `0x1422e74f0` -> `0x1422e7ad0`: DirectInput keyboard `GetDeviceState(0x100)` mapped scan code ->
+  VK, or GetAsyncKeyState for all VKs without the device; key repeat 500/100 ms on sMain+0x38 (ms
+  clock). Pad: XInputGetState from `0x1422a5710` / `0x1422a59d0` (sPad, vtables near `0x14350dd68`;
+  sMhPad near `0x1433fc580`).
+- BetterInputs.dll (2020 Stracker plugin) patches `0x1411edc90` (called from `0x141230bb0`): a
+  per-action input buffer whose window counts down both in time (+0x10 -= dt) and in frames (+0x14
+  -= 1 per call), so buffered inputs expire sooner at high frame rates; the mod's replacement adds
+  conditions on player state (+0x76b0 -> +0x9f8, +0x6274, +0x6278). It changes buffering, not when
+  input is read.
 
 Driver DLSS store: `%ProgramData%\NVIDIA\NGX\models\dlss\versions\<(maj<<16)|(min<<8)|patch>\files\
 <id>.bin`; MHW's own OTA entries are app B9D2F5C (DLSS 1.2.110), the NVIDIA App override build is
@@ -283,7 +381,26 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
   `natpeek.py` (texture natives and refcounts), `campeek.py` (camera), `modetest.py` (run-time Mode
   switch test), `bypasstest.py` (AA give-back + VRAM leak check), `bypassupscale.py` (Bypass in
   Performance keeps the hold), `titletest.ps1`, `abmulti.ps1`
-  (multi-frame A/B captures), `specshift.py`, `jitregion.py`, `blocky.py` (dump/capture analysis).
+  (multi-frame A/B captures), `specshift.py`, `jitregion.py`, `blocky.py` (dump/capture analysis),
+  `latencytest.ps1` (NVIDIA latency report per ini variant), `sslrpeek.py` (SSLR switches).
+- `tools/capture/` (documented in docs/technical.md, Graphics debugging): `MHW-Capture.dll` loads
+  RenderDoc from `nativePC\plugins` (SPL early load, before the device exists); `echo 1 >
+  nativePC\plugins\MHW-Capture.trigger` captures. Under RenderDoc the game's NGX setup fails and
+  the game writes `NVIDIA DLSS=Off` into graphics_option.ini: restore it. `rdq.py --start X.rdc`
+  keeps a capture open in qrenderdoc's Python (`rdserver.py`), `rdq.py script.py` queries it,
+  `texio.py` loads texture dumps. RenderDoc 1.46 is installed (winget); its first-run analytics
+  prompt blocks scripted runs (switched off in `%APPDATA%\qrenderdoc\UI.config`). Launching the exe
+  through any debugger fails because the Steam DRM stub restarts it through Steam. Nsight Graphics
+  2026.3 can capture NGX (`ngfx-capture`), but its captures need the GUI.
+- `tools/live/mhwharness.py` (documented in `tools/live/HARNESS.md`): `to-game` gets from a cold
+  start into the world, player controllable, in about 42 s without a human (offline dialog: Space,
+  menus: F, never R/N on the save screen); `pos`, `state`, `key`/`hold`/`mouse`, `react KEY`
+  (key press to player movement, ms), `kill`. Player position `[[0x14500eca0]+0x58]+0x160`.
+  `tools/live/latencymatrix.ps1` runs one restart configuration (game Frame Rate option, driver Max
+  Frame Rate, `-Dx11`) with ini variants through `to-game` and `react`; `-Restore` puts
+  graphics_option.ini and the driver profile back. `tools/live/nvprofile.py get|set|delete frl`
+  reads or changes the driver's Max Frame Rate in the game's NVIDIA profile (takes effect at game
+  start).
 
 ## History and open items
 
@@ -298,13 +415,22 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
   handle LF inis. 0.8.0 rename; 0.8.1 SharpPluginLoader 2.0 (early load); 0.8.2 optimised build,
   ini checked by time (500 ms), developer keys out of the default ini (listed in
   docs/technical.md; `Bypass` moved to [DLSS]), renderer state compared without formatting.
+  0.9.0 NVIDIA Reflex (low latency, boost, frame limit, markers, latency report); the input lag
+  investigation behind it is in docs/technical.md (a 60 fps cap costs ~10 ms against ~165 fps,
+  whichever limiter; DLSS adds none).
+  0.9.1 reflection fix (SSLR 2x2 history swap held off while DLSS runs; developer key
+  `ReflectionFix`).
+- Input lag measured in the hub with the harness (docs/technical.md): the game's 60 cap never worse
+  than the driver's; a user report of the opposite was closed as a fluke. Not measured: hunts.
 - Not exercised by tests: the NGX shutdown path (only at game exit; the test runs kill the game)
   and the NGX-unavailable release.
 - To verify: run-time Mode switches with a real HDR10 swapchain (Windows HDR on, ScreenMode=HDRMode;
   the 0.7.2 tests ran with the swapchain in SDR format 87). The 0.7.1 fault happened in HDR mode.
-- Known content limits: weapon/specular shine shows render-pixel steps in the upscaling modes
-  (the game's own specular aliasing: highlights change 3-4x more between frames than the jitter
-  explains; same in DLAA at 1-pixel scale). Lower sharpening or Quality/DLAA helps; a firefly clamp
-  would cost real highlights. The checkerboard on planks is the game's dithered transparency.
+- Weapon/metal reflections showing render-pixel steps in the upscaling modes (open since 0.7):
+  mostly the SSLR 2x2 history swap, fixed by ReflectionFix in 0.9.1 (the "3-4x more change between
+  frames than the jitter explains" was that swap). Left: reflections are traced at half render
+  resolution (hard-coded, see the RE reference), so they stay softer than the rest in the upscaling
+  modes. The checkerboard on planks and near the camera is the game's dithered transparency, not
+  a bug (the user's call).
 - Known limitations: in the upscaling modes DLSS sees the frame after post-processing; texture mip
   bias is not lowered; the game's TAA still runs under DLSS in DLAA (result discarded).

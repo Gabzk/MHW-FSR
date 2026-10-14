@@ -26,6 +26,7 @@
 #include "memory.h"
 #include "ngx_params.h"
 #include "probe.h"
+#include "reflex.h"
 #include "sharpen.h"
 
 namespace mhwdlss::ngx {
@@ -1159,12 +1160,13 @@ void OnUpdate() {
 void ReloadSettings(bool& recompute) {
     if (ReloadConfigIfChanged()) {
         game::ApplyConfig(g_config);
+        reflex::Configure(g_config);
         LogSetLevel(g_config.logLevel);
         LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
-             "exposure {}, bypass {}",
+             "exposure {}, reflection fix {}, bypass {}, Reflex {}, frame limit {}",
              QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
              g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
-             g_config.bypass);
+             g_config.reflectionFix, g_config.bypass, ReflexModeName(g_config.reflex), g_config.frameLimit);
         for (auto& f : g_features) {
             f->dlss.failed = false;  // allow a retry with the new settings
             f->evaluations = 0;      // log the next evaluations in detail again

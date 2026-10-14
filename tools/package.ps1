@@ -18,9 +18,9 @@ Copy-Item (Join-Path $build 'MHW-DLSS4.dll') $plugins
 Copy-Item (Join-Path $root 'README.md') (Join-Path $stage 'MHW-DLSS4-README.md')
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'MHW-DLSS4-LICENSE.txt')
 
-# Licences of what the plugin and the package contain: NVSharpen (NVIDIA Image Scaling SDK, MIT)
-# and RCAS (AMD FidelityFX FSR 1.0, MIT)
-# are compiled into the DLL, the DLSS SDK is linked (and nvngx_dlss.dll ships beside it with -Dlss).
+# Licences of what the plugin and the package contain: NVSharpen (NVIDIA Image Scaling SDK, MIT),
+# RCAS (AMD FidelityFX FSR 1.0, MIT) and the NVAPI declarations for Reflex (MIT) are compiled into
+# the DLL, the DLSS SDK is linked (and nvngx_dlss.dll ships beside it with -Dlss).
 $notices = @(
     "Third-party software in MHW-DLSS4",
     "",
@@ -33,6 +33,11 @@ $notices = @(
     "https://github.com/GPUOpen-Effects/FidelityFX-FSR",
     "",
     (Get-Content -Raw (Join-Path $root 'third_party\amd_fsr\licence.txt')),
+    "",
+    "== NVIDIA NVAPI SDK (Reflex declarations from third_party/nvapi/nvapi_reflex.h, compiled into MHW-DLSS4.dll)",
+    "https://github.com/NVIDIA/nvapi",
+    "",
+    (Get-Content -Raw (Join-Path $root 'third_party\nvapi\licence.txt')),
     "",
     "== NVIDIA DLSS SDK (NGX library linked into MHW-DLSS4.dll$(if ($Dlss) { ', nvngx_dlss.dll' }))",
     "https://github.com/NVIDIA/DLSS",

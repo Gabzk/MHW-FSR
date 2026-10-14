@@ -58,7 +58,15 @@ constexpr wchar_t kDefaultIni[] =
     L"; Let DLSS estimate exposure itself (presets L and M always do).\n"
     L"AutoExposure=0\n"
     L"; DLAA mode only: show the game's TAA instead of DLSS, for comparisons.\n"
-    L"Bypass=0\n";
+    L"Bypass=0\n"
+    L"\n"
+    L"[Reflex]\n"
+    L"; NVIDIA Reflex Low Latency: Off, On or Boost. On lets the driver start each frame just in\n"
+    L"; time for the graphics card, and makes a frame rate cap set in the NVIDIA Control Panel or\n"
+    L"; NVIDIA App wait at the start of the frame, where it adds the least input lag. Boost also\n"
+    L"; keeps the graphics card at full clock speed: a little less input lag, more power.\n"
+    L"; Works with NVIDIA DLSS on or off.\n"
+    L"LowLatency=On\n";
 
 std::wstring g_iniPath;
 unsigned long long g_iniTime = 0;
@@ -66,6 +74,7 @@ unsigned long long g_iniTime = 0;
 std::wstring g_gameOptionsPath;
 unsigned long long g_gameOptionsTime = 0;
 float g_gameSharpness = 0.0f;
+int g_gameFrameRate = 0;
 
 unsigned long long LastWrite(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data;
@@ -74,7 +83,7 @@ unsigned long long LastWrite(const std::wstring& path) {
            data.ftLastWriteTime.dwLowDateTime;
 }
 
-constexpr const wchar_t* kSections[] = {L"General", L"DLSS", L"Advanced"};
+constexpr const wchar_t* kSections[] = {L"General", L"DLSS", L"Reflex", L"Advanced"};
 
 std::wstring ReadString(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
     // The key's own section first. A key added under another section of the file (easy to do when
@@ -164,6 +173,15 @@ const char* SharpenerName(Sharpener sharpener) {
     return "?";
 }
 
+const char* ReflexModeName(ReflexMode mode) {
+    switch (mode) {
+        case ReflexMode::Off: return "Off";
+        case ReflexMode::On: return "On";
+        case ReflexMode::Boost: return "Boost";
+    }
+    return "?";
+}
+
 void LoadConfig(const std::wstring& ini) {
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::ofstream out(ini, std::ios::binary);
@@ -208,6 +226,11 @@ void LoadConfig(const std::wstring& ini) {
     c.autoExposure = ReadBool(ini, L"DLSS", L"AutoExposure", c.autoExposure);
     c.bypass = ReadBool(ini, L"DLSS", L"Bypass", c.bypass);
 
+    auto lowLatency = Lower(ReadString(ini, L"Reflex", L"LowLatency", L"on"));
+    if (lowLatency == L"off" || lowLatency == L"0") c.reflex = ReflexMode::Off;
+    else if (lowLatency == L"boost") c.reflex = ReflexMode::Boost;
+    else c.reflex = ReflexMode::On;
+
     // [Advanced]: developer keys, not in the default ini (docs/technical.md lists them). Inis of 0.8.1
     // and older still have the measured conventions there, with the default values.
 
@@ -221,6 +244,7 @@ void LoadConfig(const std::wstring& ini) {
     c.jitterScaleY = ReadFloat(ini, L"Advanced", L"JitterScaleY", c.jitterScaleY);
     c.forceJitter = ReadBool(ini, L"Advanced", L"ForceJitter", c.forceJitter);
     c.fullPixelJitter = ReadBool(ini, L"Advanced", L"FullPixelJitter", c.fullPixelJitter);
+    c.reflectionFix = ReadBool(ini, L"Advanced", L"ReflectionFix", c.reflectionFix);
     c.hdr = static_cast<int>(ReadFloat(ini, L"Advanced", L"HDR", static_cast<float>(c.hdr)));
     c.exposureScale = ReadFloat(ini, L"Advanced", L"ExposureScale", c.exposureScale);
     c.preExposure = ReadFloat(ini, L"Advanced", L"PreExposure", c.preExposure);
@@ -234,6 +258,11 @@ void LoadConfig(const std::wstring& ini) {
     c.debugFixedJitter = ReadBool(ini, L"Advanced", L"DebugFixedJitter", c.debugFixedJitter);
     c.debugJitterX = ReadFloat(ini, L"Advanced", L"DebugJitterX", c.debugJitterX);
     c.debugJitterY = ReadFloat(ini, L"Advanced", L"DebugJitterY", c.debugJitterY);
+    c.latencyStats = ReadBool(ini, L"Advanced", L"LatencyStats", c.latencyStats);
+    // Reflex frame rate cap: measured to add the same input lag as the game's own cap and the
+    // driver's (with LowLatency on), so it is only kept for measurements.
+    c.frameLimit = std::clamp(ReadFloat(ini, L"Advanced", L"FrameLimit", c.frameLimit), 0.0f, 1000.0f);
+    c.reflexSleep = ReadBool(ini, L"Advanced", L"ReflexSleep", c.reflexSleep);
 
     g_config = c;
     g_iniPath = ini;
@@ -251,6 +280,8 @@ void LoadGameOptions(const std::wstring& path) {
     g_gameOptionsPath = path;
     g_gameOptionsTime = LastWrite(path);
     g_gameSharpness = std::clamp(ReadFloat(path, L"GraphicsOption", L"DLSS_Sharpness", 0.0f), 0.0f, 1.0f);
+    // 30, 60, 90, 120, 144, 165, 240 or No Limit.
+    g_gameFrameRate = std::max(0, static_cast<int>(ReadFloat(path, L"GraphicsOption", L"FrameRate", 0.0f)));
 }
 
 bool ReloadGameOptionsIfChanged() {
@@ -261,5 +292,7 @@ bool ReloadGameOptionsIfChanged() {
 }
 
 float GameSharpness() { return g_gameSharpness; }
+
+int GameFrameRate() { return g_gameFrameRate; }
 
 }  // namespace mhwdlss

@@ -7,6 +7,7 @@
 #include "game.h"
 #include "log.h"
 #include "ngx_shim.h"
+#include "reflex.h"
 
 namespace fs = std::filesystem;
 using namespace mhwdlss;
@@ -31,11 +32,13 @@ void Start(HMODULE module) {
     LOGI("MHW-DLSS4 {} loaded from {}", MHW_DLSS4_VERSION, Narrow(dll));
     LOGI("game: {}", Narrow(exe));
     LOGI("config: mode {} (render scale {:.3f}), preset {}, sharpness {:.2f}{} with {}, depth inverted {}, MV scale {},{}, "
-         "jitter scale {},{}",
+         "jitter scale {},{}, reflection fix {}, Reflex {}, frame limit {}",
          QualityModeName(g_config.mode), g_config.RenderScale(),
          g_config.preset ? static_cast<char>('A' + g_config.preset - 1) : '-', g_config.Sharpness(),
          g_config.sharpness < 0.0f ? " (game option)" : "", SharpenerName(g_config.sharpener), g_config.depthInverted, g_config.mvScaleX,
-         g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY);
+         g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.reflectionFix,
+         ReflexModeName(g_config.reflex),
+         g_config.frameLimit);
 
     std::error_code ec;
     // Up to 0.7.3 the plugin was MHWDLSS.dll. With both in the folder only the one the loader loads
@@ -64,6 +67,8 @@ void Start(HMODULE module) {
         LOGE("NGX hooks failed, plugin inactive");
         return;
     }
+    reflex::Configure(g_config);
+    reflex::Install();
     // Only now do the game hooks act; until here they call straight through to the game.
     game::Activate(g_config);
     LOGI("ready; turn on NVIDIA DLSS in the game's graphics options");
