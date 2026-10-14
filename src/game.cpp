@@ -244,9 +244,9 @@ bool CameraCut(uint8_t* camera, uint64_t frame) {
     if (viewport != g_shotViewport && g_viewportLogs < 20) {
         ++g_viewportLogs;
         if (shot)
-            LOGI("camera: main viewport {} (cut detection on)", viewport);
+            LOGD("camera: main viewport {} (cut detection on)", viewport);
         else
-            LOGI("camera: no main viewport (active, pass 0, drawn to the screen); camera cuts are not "
+            LOGD("camera: no main viewport (active, pass 0, drawn to the screen); camera cuts are not "
                  "detected until one is back");
     }
     g_shotViewport = viewport;
@@ -269,7 +269,7 @@ bool CameraCut(uint8_t* camera, uint64_t frame) {
             if (a.scale[j] != 0.0f) zoom = std::max(zoom, std::abs(b.scale[j] / a.scale[j] - 1.0f));
         g_cutFrameIsCut = d2 > kCutDistance * kCutDistance || cosTurn < kCutTurnCos || zoom > kCutProjection;
         if (g_cutFrameIsCut && g_cuts.fetch_add(1) < 20)
-            LOGI("camera cut at frame {}: moved {:.0f}, turned {:.0f} degrees, zoom {:.1f}%; DLSS history reset",
+            LOGD("camera cut at frame {}: moved {:.0f}, turned {:.0f} degrees, zoom {:.1f}%; DLSS history reset",
                  frame, std::sqrt(d2), std::acos(std::clamp(cosTurn, -1.0f, 1.0f)) * 57.29578f, zoom * 100.0f);
     }
     g_lastShot = shot;
@@ -304,7 +304,7 @@ void CaptureJitter(uint8_t* taa) {
     if (n < 4 || (g_settings.verboseFrames && n < 40)) {
         ++logged;
         // Inputs of the TAA update's jitter decision, to explain a zero jitter.
-        LOGI("jitter capture: frame {}, slot {}, jitter {:.4f},{:.4f}, camera frame {}, render frame {}, blend {:.3f}, "
+        LOGD("jitter capture: frame {}, slot {}, jitter {:.4f},{:.4f}, camera frame {}, render frame {}, blend {:.3f}, "
              "type {}, flags {:#x}, enabled {}, view flags {:#x}",
              *frame, slot, (*jitter)[0], (*jitter)[1],
              mem::SafeRead<uint64_t>(camera + kCameraJitter + 8).value_or(0),
@@ -355,7 +355,7 @@ void PatchViewDepth(uint8_t* drawContext) {
         InterlockedDecrement(refs);
         return;
     }
-    LOGI("game: depth copy texture {} given its native {} as depth view (references {})", static_cast<void*>(*depth),
+    LOGD("game: depth copy texture {} given its native {} as depth view (references {})", static_cast<void*>(*depth),
          *colorNative, references);
 }
 
@@ -394,7 +394,7 @@ bool EnsureJitter(uint8_t* taa) {
     static bool logged = false;
     if (!logged) {
         logged = true;
-        LOGI("jitter: the TAA update did not jitter the camera (blend {:.3f}, type {}, flags {:#x}, enabled {}); "
+        LOGD("jitter: the TAA update did not jitter the camera (blend {:.3f}, type {}, flags {:#x}, enabled {}); "
              "the plugin does while DLSS runs",
              mem::SafeRead<float>(taa + 0x180).value_or(-1.0f), mem::SafeRead<uint32_t>(taa + 0xc).value_or(0),
              mem::SafeRead<uint32_t>(taa + 0x14).value_or(0), mem::SafeRead<uint8_t>(taa + kTaaJitterEnable).value_or(0));
@@ -500,7 +500,7 @@ void HoldTaaOnly() {
         // Any other value was set by the game (at start, or when it applied the options again).
         if (current != kAaTaaOnly) {
             if (!g_aaHeld || current != g_aaGame)
-                LOGI("anti-aliasing: the game set {}; TAA only while DLSS runs", AaName(current));
+                LOGD("anti-aliasing: the game set {}; TAA only while DLSS runs", AaName(current));
             g_aaGame = current;
             *word = kAaTaaOnly;
             g_aaOurs = true;
@@ -515,7 +515,7 @@ void HoldTaaOnly() {
         if (dlss && g_aaOurs && g_aaGame != kAaTaaOnly) {
             *word = g_aaGame;
             g_aaOurs = false;
-            LOGI("anti-aliasing: back to the game's {} ({})", AaName(g_aaGame),
+            LOGD("anti-aliasing: back to the game's {} ({})", AaName(g_aaGame),
                  unavailable ? "DLSS is not available" : "Bypass");
         }
     }
@@ -557,7 +557,7 @@ void HoldReflectionJitterOff() {
     if (g_settings.reflectionFix && DlssEnabledInGame() && !Bypassed() && !g_dlssUnavailable) {
         if (current != 0) {
             // Once per hold: the game sets the switch when the scene starts, maybe after the hold began.
-            if (!g_sslrLogged) LOGI("reflections: the game's 2x2 reflection filter is off while DLSS runs");
+            if (!g_sslrLogged) LOGD("reflections: the game's 2x2 reflection filter is off while DLSS runs");
             g_sslrLogged = true;
             g_sslrGame = current;
             *flag = 0;
@@ -571,7 +571,7 @@ void HoldReflectionJitterOff() {
         g_sslrLogged = false;
         if (g_sslrOurs && g_sslrGame != 0) {
             *flag = g_sslrGame;
-            LOGI("reflections: back to the game's filter");
+            LOGD("reflections: back to the game's filter");
         }
         g_sslrOurs = false;
     }
@@ -621,7 +621,7 @@ void HoldMipBias() {
             if (!g_bankOurs) g_bankGame = current;
             *bank = wanted;
             g_bankOurs = wanted;
-            LOGI("textures: mip bias bank {} ({:.2f} levels, render scale {:.3f}) for areas loaded from now on",
+            LOGD("textures: mip bias bank {} ({:.2f} levels, render scale {:.3f}) for areas loaded from now on",
                  wanted, -std::log2(1.5f + 0.5f * static_cast<float>(wanted)), scale);
         }
         g_bankHeld = true;
@@ -630,7 +630,7 @@ void HoldMipBias() {
         if (g_bankOurs) {
             *bank = g_bankGame;
             g_bankOurs = 0;
-            LOGI("textures: the game's mip bias bank {} for areas loaded from now on", g_bankGame);
+            LOGD("textures: the game's mip bias bank {} for areas loaded from now on", g_bankGame);
         }
     }
 }
@@ -659,7 +659,7 @@ public:
         static bool logged = false;
         if (!logged) {
             logged = true;
-            LOGI("game: TAA sharpen pass (amount {:.3f}) turned off while DLSS runs",
+            LOGD("game: TAA sharpen pass (amount {:.3f}) turned off while DLSS runs",
                  mem::SafeRead<float>(taa + 0x198).value_or(-1.0f));
         }
     }
@@ -712,7 +712,7 @@ void* __fastcall HookTaaUpdate(void* self) {
 void* __fastcall HookTaaDraw(void* self, void* drawContext) {
     if (!g_active) return g_origTaaDraw(self, drawContext);
     static std::atomic<uint64_t> calls{0};
-    if (calls.fetch_add(1) == 0) LOGI("game: first TAA draw (filter {})", self);
+    if (calls.fetch_add(1) == 0) LOGD("game: first TAA draw (filter {})", self);
     if (g_frameCallback) g_frameCallback();
     auto* taa = static_cast<uint8_t*>(self);
     bool dlss = DlssEnabledInGame();
@@ -761,7 +761,7 @@ bool HookFrameUpdate(const mem::Section& text, const mem::Section& rdata, std::s
     }
     original = reinterpret_cast<FrameUpdateFn>(*slot);
     mem::WritePointer(slot, hook);
-    LOGI("game: {} +{:#x} hooked through vtable slot +{:#x}", name, Rva(matches[0]), Rva(slot));
+    LOGD("game: {} +{:#x} hooked through vtable slot +{:#x}", name, Rva(matches[0]), Rva(slot));
     return true;
 }
 
@@ -786,7 +786,7 @@ bool Init() {
     g_renderer = reinterpret_cast<uint8_t**>(mem::RipTarget(update + 0x07, update + 0x0b));
     g_scene = reinterpret_cast<uint8_t**>(mem::RipTarget(update + 0x49, update + 0x4d));
     g_camera = reinterpret_cast<uint8_t**>(mem::RipTarget(update + 0x55, update + 0x59));
-    LOGI("game: TAA update at +{:#x}, renderer global +{:#x}, scene global +{:#x}, camera global +{:#x}",
+    LOGD("game: TAA update at +{:#x}, renderer global +{:#x}, scene global +{:#x}, camera global +{:#x}",
          Rva(update), Rva(g_renderer), Rva(g_scene), Rva(g_camera));
 
     // The TAA vtable is the only place in .rdata that points at the update method.
@@ -813,14 +813,14 @@ bool Init() {
     }
     g_origTaaDraw = reinterpret_cast<TaaDrawFn>(*drawSlot);
     mem::WritePointer(drawSlot, reinterpret_cast<void*>(&HookTaaDraw));
-    LOGI("game: TAA draw +{:#x} hooked through vtable slot +{:#x}", Rva(g_origTaaDraw), Rva(drawSlot));
+    LOGD("game: TAA draw +{:#x} hooked through vtable slot +{:#x}", Rva(g_origTaaDraw), Rva(drawSlot));
     g_origTaaUpdate = reinterpret_cast<TaaUpdateFn>(*updateSlot);
     mem::WritePointer(updateSlot, reinterpret_cast<void*>(&HookTaaUpdate));
 
     auto recompute = mem::FindPattern(*text, kRecomputePattern);
     if (recompute.size() == 1) {
         g_recompute = reinterpret_cast<RecomputeFn>(recompute[0]);
-        LOGI("game: render scale update at +{:#x}", Rva(recompute[0]));
+        LOGD("game: render scale update at +{:#x}", Rva(recompute[0]));
     } else {
         LOGW("game: render scale update matched {} times; scale changes need a settings toggle",
              recompute.size());
@@ -831,7 +831,7 @@ bool Init() {
         int32_t offset;
         std::memcpy(&offset, aaSetter[0] + kSceneAaSetterDisp, sizeof(offset));
         g_sceneAa = offset;
-        LOGI("game: anti-aliasing switches at scene +{:#x} (setter +{:#x})", offset, Rva(aaSetter[0]));
+        LOGD("game: anti-aliasing switches at scene +{:#x} (setter +{:#x})", offset, Rva(aaSetter[0]));
     } else {
         LOGW("game: anti-aliasing setter matched {} times; the Anti-Aliasing option stays in effect with DLSS",
              aaSetter.size());
@@ -842,7 +842,7 @@ bool Init() {
         int32_t offset;
         std::memcpy(&offset, sslrSelect[0] + kSslrGBufferJitterDisp, sizeof(offset));
         g_sceneSslrJitter = offset;
-        LOGI("game: reflection filter switch at scene +{:#x} (+{:#x})", offset, Rva(sslrSelect[0]));
+        LOGD("game: reflection filter switch at scene +{:#x} (+{:#x})", offset, Rva(sslrSelect[0]));
     } else {
         LOGW("game: reflection technique choice matched {} times; ReflectionFix has no effect", sslrSelect.size());
     }
@@ -852,7 +852,7 @@ bool Init() {
         int32_t offset;
         std::memcpy(&offset, samplerBank[0] + kSamplerBankDisp, sizeof(offset));
         g_sceneSamplerBank = offset;
-        LOGI("game: sampler bank at scene +{:#x} (+{:#x})", offset, Rva(samplerBank[0]));
+        LOGD("game: sampler bank at scene +{:#x} (+{:#x})", offset, Rva(samplerBank[0]));
     } else {
         LOGW("game: material sampler resolve matched {} times; the texture mip bias stays the game's",
              samplerBank.size());
@@ -863,9 +863,9 @@ bool Init() {
         g_apiFlag = mem::RipTarget(apiFlag[0] + 0x13, apiFlag[0] + 0x17);
         // Set when the renderer starts, which may be after the plugin is loaded.
         if (Device())
-            LOGI("game: renderer API flag at +{:#x} (DX12 = {})", Rva(g_apiFlag), *g_apiFlag != 0);
+            LOGD("game: renderer API flag at +{:#x} (DX12 = {})", Rva(g_apiFlag), *g_apiFlag != 0);
         else
-            LOGI("game: renderer API flag at +{:#x} (renderer not started yet)", Rva(g_apiFlag));
+            LOGD("game: renderer API flag at +{:#x} (renderer not started yet)", Rva(g_apiFlag));
     } else {
         LOGW("game: renderer API flag matched {} times", apiFlag.size());
     }
@@ -887,7 +887,7 @@ bool Init() {
         mem::RipTarget(renderThread[0] + 3, renderThread[0] + 7) == reinterpret_cast<uint8_t*>(g_renderer)) {
         g_setEventImport = reinterpret_cast<void**>(mem::RipTarget(renderThread[0] + 16, renderThread[0] + 20));
         g_waitImport = reinterpret_cast<void**>(mem::RipTarget(renderThread[0] + 41, renderThread[0] + 45));
-        LOGI("game: render thread loop at +{:#x}, SetEvent import +{:#x}, WaitForSingleObject import +{:#x}",
+        LOGD("game: render thread loop at +{:#x}, SetEvent import +{:#x}, WaitForSingleObject import +{:#x}",
              Rva(renderThread[0]), Rva(g_setEventImport), Rva(g_waitImport));
     } else {
         LOGW("game: render thread loop matched {} times", renderThread.size());

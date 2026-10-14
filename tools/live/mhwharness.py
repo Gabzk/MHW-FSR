@@ -792,7 +792,7 @@ def describe(g):
     if f0 is not None and f1 is not None and f1 > f0:
         st.info["fps"] = "%.0f" % ((f1 - f0) / (t1 - t0))
     lines = log_lines_since(started or 0)
-    st.info["log"] = ",".join(k for k, pat in (("swapchain", "swap chain"), ("eval512", "evaluate #512 ok"))
+    st.info["log"] = ",".join(k for k, pat in (("reflex", "NVIDIA Reflex:"), ("eval512", "evaluate #512 ok"))
                               if any(pat in l for l in lines))
     return st
 

@@ -16,6 +16,7 @@ exec(_src.split("start = time.strftime")[0].replace("cycles = int(sys.argv[1])",
 m.__dict__.update(_ns)
 
 ok = True
+m.set_key("LogLevel", "Debug")  # the evaluate progress lines are debug lines
 m.set_key("Mode", "Performance")
 time.sleep(4)
 n = len(m.log_lines())
@@ -33,5 +34,6 @@ m.set_key("Bypass", "0")
 time.sleep(3)
 m.set_key("Mode", "DLAA")
 time.sleep(3)
+m.set_key("LogLevel", "Info")
 print("back to DLAA:", m.aa_state())
 sys.exit(0 if ok else 1)

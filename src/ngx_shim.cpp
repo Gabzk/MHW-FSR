@@ -234,7 +234,7 @@ bool StaleFrame(Feature& f, unsigned width, unsigned height) {
         return false;
     }
     if (f.staleFrames == 1)
-        LOGI("{}: skipping {}x{} frames from before the switch to {}x{}", f.Name(), width, height, f.expectedWidth,
+        LOGD("{}: skipping {}x{} frames from before the switch to {}x{}", f.Name(), width, height, f.expectedWidth,
              f.expectedHeight);
     return true;
 }
@@ -296,7 +296,7 @@ void ShutdownLegacy() {
             f->legacy = nullptr;
         }
         NVSDK_NGX_Result r = shutdown();
-        LOGI("legacy NGX {} context shut down ({:#x})", ApiName(api), static_cast<unsigned>(r));
+        LOGD("legacy NGX {} context shut down ({:#x})", ApiName(api), static_cast<unsigned>(r));
         s.legacy = {};
     }
     g_legacyParams = nullptr;
@@ -400,7 +400,7 @@ void LogDlssModules() {
         if (!GetModuleFileNameW(modules[i], path, MAX_PATH)) continue;
         std::filesystem::path p(path);
         if (_wcsicmp(p.filename().c_str(), L"nvngx_dlss.dll") != 0) continue;
-        LOGI("loaded {} {}", p.string(), VersionString(DllVersion(path)));
+        LOGD("loaded {} {}", p.string(), VersionString(DllVersion(path)));
     }
 }
 
@@ -594,17 +594,19 @@ void LogEvaluation(Feature& f, NVSDK_NGX_Result r, const EvalInputs& in, const d
     uint64_t n = f.evaluations++;
     if (in.reset) ++f.resets;
     if (n < kDetailedEvaluations || NVSDK_NGX_FAILED(r)) {
-        LOGI("{} evaluate #{}: result {:#x}; colour {}x{} fmt {}, output {}x{} fmt {}; render {}x{} at {},{}; "
+        LOGD("{} evaluate #{}: result {:#x}; colour {}x{} fmt {}, output {}x{} fmt {}; render {}x{} at {},{}; "
              "jitter {:.4f},{:.4f} (frame {}); reset {}",
              f.Name(), n, static_cast<unsigned>(r), color.width, color.height, color.format, output.width,
              output.height, output.format, in.width, in.height, in.colorX, in.colorY, in.jitterX, in.jitterY, frame,
              in.reset);
     } else if (g_config.verboseFrames && n < 40) {
-        LOGI("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, in.jitterX, in.jitterY, frame,
+        LOGD("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, in.jitterX, in.jitterY, frame,
              in.reset);
     } else if ((n & (n - 1)) == 0) {
-        // Resets are history restarts (camera cuts, loading); many of them look like aliasing.
-        LOGI("{} evaluate #{} ok ({} resets since #{}; {})", f.Name(), n, f.resets, n / 2, game::JitterStats());
+        // Resets are history restarts (camera cuts, loading); many of them look like aliasing. #512 is
+        // logged at Info as the sign that DLSS runs; test scripts wait for it.
+        Log(n == 512 ? LogLevel::Info : LogLevel::Debug, "{} evaluate #{} ok ({} resets since #{}; {})", f.Name(), n,
+            f.resets, n / 2, game::JitterStats());
         f.resets = 0;
     }
 }
@@ -691,7 +693,7 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
         g_upscale.reset = in.reset;
         g_upscale.frame = frame;
         if (f.evaluations++ < kDetailedEvaluations)
-            LOGI("DLSS evaluate: upscaling mode, render {}x{} passed on for DLISP", rect.width, rect.height);
+            LOGD("DLSS evaluate: upscaling mode, render {}x{} passed on for DLISP", rect.width, rect.height);
         return NVSDK_NGX_Result_Success;
     }
 
@@ -731,7 +733,7 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
         static bool logged = false;
         if (!logged) {
             logged = true;
-            LOGI("DLISP called without a TAA pass before it (intro or loading screen); frame left to the game");
+            LOGD("DLISP called without a TAA pass before it (intro or loading screen); frame left to the game");
         }
         return NVSDK_NGX_Result_Fail;
     }
@@ -777,7 +779,7 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
 
 NVSDK_NGX_Result ShimShutdown(Api api) {
     std::lock_guard lock(g_mutex);
-    LOGI("game called NGX {} Shutdown", ApiName(api));
+    LOGD("game called NGX {} Shutdown", ApiName(api));
     for (auto& f : g_features)
         if (f->api == api) ReleaseDlss(*f);
     // Only what belongs to this API: both tables are hooked, and the game may shut down the one it
@@ -817,7 +819,7 @@ NVSDK_NGX_Result ShimCreate(Api api, void*, NVSDK_NGX_Feature id, NVSDK_NGX_Para
     Feature* f = AddFeature(api, id, nullptr);
     f->expectedWidth = GetUI(params, NVSDK_NGX_Parameter_Width);
     f->expectedHeight = GetUI(params, NVSDK_NGX_Parameter_Height);
-    LOGI("game created {} ({}): {}x{} -> {}x{}, HDR {}", f->Name(), ApiName(api),
+    LOGD("game created {} ({}): {}x{} -> {}x{}, HDR {}", f->Name(), ApiName(api),
          GetUI(params, NVSDK_NGX_Parameter_Width), GetUI(params, NVSDK_NGX_Parameter_Height),
          GetUI(params, NVSDK_NGX_Parameter_OutWidth), GetUI(params, NVSDK_NGX_Parameter_OutHeight),
          GetI(params, "Hint.HDR"));
@@ -851,7 +853,7 @@ NVSDK_NGX_Result ShimRelease(Api api, NVSDK_NGX_Handle* handle) {
     });
     if (it == g_features.end()) return NVSDK_NGX_Result_Success;
     Feature& f = **it;
-    LOGI("game released {} feature {:#x}", f.Name(), f.handle.id);
+    LOGD("game released {} feature {:#x}", f.Name(), f.handle.id);
     ReleaseDlss(f);
     if (f.legacy) {
         if (auto release = reinterpret_cast<PfnRelease>(State(api).legacy.release)) release(f.legacy);
@@ -951,7 +953,7 @@ void PatchTable(ApiState& s, Api api, bool initial) {
     const void* const* values = reinterpret_cast<const void* const*>(&s.shim);
     for (int i = 0; i < 7; ++i) mem::WritePointer(slots + i, const_cast<void*>(values[i]));
     if (initial)
-        LOGI("NGX {} table hooked (legacy core {})", ApiName(api), s.legacy.create ? "loaded" : "not loaded");
+        LOGD("NGX {} table hooked (legacy core {})", ApiName(api), s.legacy.create ? "loaded" : "not loaded");
     else
         LOGW("NGX {} table was rewritten by the game, hooked again", ApiName(api));
 }
@@ -998,7 +1000,7 @@ FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
         const void* const* shim = reinterpret_cast<const void* const*>(&State(api).shim);
         for (int i = 0; i < 7; ++i) {
             if (std::strcmp(name + prefix.size(), kEntries[i]) != 0) continue;
-            if (i == 0) LOGI("game initialises NGX {} through the plugin's entries", ApiName(api));
+            if (i == 0) LOGD("game initialises NGX {} through the plugin's entries", ApiName(api));
             return reinterpret_cast<FARPROC>(const_cast<void*>(shim[i]));
         }
     }
@@ -1032,7 +1034,7 @@ void HookNgxLookups(HMODULE exe) {
     }
     g_realGetProcAddress = reinterpret_cast<GetProcAddressFn>(*slot);
     mem::WritePointer(slot, reinterpret_cast<void*>(&HookGetProcAddress));
-    LOGI("loaded before the game's renderer: its NGX init will get the plugin's entries (import slot +{:#x})",
+    LOGD("loaded before the game's renderer: its NGX init will get the plugin's entries (import slot +{:#x})",
          reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(exe));
 }
 
@@ -1056,7 +1058,7 @@ void AdoptContext(bool mayUseDxgi) {
         LeaveCriticalSection(lock);
         int legacyDlss = -1;
         if (g_legacyParams) g_legacyParams->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &legacyDlss);
-        LOGI("DLSS context adopted (game's NGX 1.x reported DLSS available {}; existing DLSS {}, DLISP {})",
+        LOGD("DLSS context adopted (game's NGX 1.x reported DLSS available {}; existing DLSS {}, DLISP {})",
              legacyDlss, ctx->dlssHandle, ctx->dlispHandle);
         g_adoptedLate = mayUseDxgi;  // after Install, which refreshes the render scale itself
         return;
@@ -1106,14 +1108,14 @@ void OnFrame() {
         if (ctx && !ctx->dlispHandle) {
             Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
             ctx->dlispHandle = AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, nullptr)->Handle();
-            LOGI("attached a DLISP feature for the upscaling mode");
+            LOGD("attached a DLISP feature for the upscaling mode");
         }
     }
 
     static game::RendererState lastState;
     game::RendererState state = game::ReadState();
     if (!(state == lastState)) {
-        LOGI("renderer: {}", game::DescribeState(state));
+        LOGD("renderer: {}", game::DescribeState(state));
         lastState = state;
     }
 }
@@ -1137,7 +1139,7 @@ void OnUpdate() {
         if (g_adoptedLate) {
             g_adoptedLate = false;
             if (game::DlssEnabledInGame()) {
-                LOGI("the game set DLSS up before the plugin took over; asking it for the render scale again");
+                LOGD("the game set DLSS up before the plugin took over; asking it for the render scale again");
                 recompute = true;
             } else if (game::DlssOptionOn()) {
                 LOGW("the game set DLSS up with DLSS 1's upscaler before the plugin took over; turn NVIDIA DLSS "
@@ -1153,7 +1155,7 @@ void OnUpdate() {
     }
     // Outside the lock: the game's recompute releases and creates its DLSS features through the
     // shim and may wait for the render thread, which takes the lock to evaluate.
-    if (recompute && game::RecomputeRenderScale()) LOGI("render scale refreshed");
+    if (recompute && game::RecomputeRenderScale()) LOGD("render scale refreshed");
 }
 
 // Twice a second: the ini and graphics_option.ini (a timestamp check each). Sets `recompute` when
@@ -1216,7 +1218,7 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     if (!game::Device()) HookNgxLookups(exe);
     game::SetFrameCallback(&OnFrame);
     game::SetUpdateCallback(&OnUpdate);
-    LOGI("renderer at install: {}", game::DescribeState());
+    LOGD("renderer at install: {}", game::DescribeState());
     return true;
 }
 
@@ -1227,7 +1229,7 @@ bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
     // Outside the lock (see OnUpdate). The game picked its render scale with the old callback
     // before we were loaded.
     if (game::Context() && game::DlssEnabledInGame() && game::RecomputeRenderScale())
-        LOGI("DLSS was already on, render scale refreshed");
+        LOGD("DLSS was already on, render scale refreshed");
     return true;
 }
 

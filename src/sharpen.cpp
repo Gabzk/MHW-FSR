@@ -292,7 +292,7 @@ ID3D12Resource* Target12(ID3D12Device* device, unsigned width, unsigned height, 
     g12.width = width;
     g12.height = height;
     g12.format = format;
-    LOGI("sharpening: {}x{} texture created", width, height);
+    LOGD("sharpening: {}x{} texture created", width, height);
     return g12.target.Get();
 }
 
@@ -363,7 +363,7 @@ ID3D11Resource* Target11(ID3D11Device* device, unsigned width, unsigned height, 
     g11.width = width;
     g11.height = height;
     g11.format = format;
-    LOGI("sharpening: {}x{} texture created", width, height);
+    LOGD("sharpening: {}x{} texture created", width, height);
     return g11.target.Get();
 }
 

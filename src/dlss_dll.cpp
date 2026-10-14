@@ -72,7 +72,7 @@ bool Stage(const fs::path& source, const fs::path& dir) {
     else if (!MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
         error = GetLastError();
     if (error == ERROR_SUCCESS) {
-        LOGI("copied {} to {}", source.string(), target.string());
+        LOGD("copied {} to {}", source.string(), target.string());
         return true;
     }
     DeleteFileW(temp.c_str());
@@ -141,7 +141,7 @@ std::wstring SelectDlssFolder(const std::wstring& dataDirName, const std::wstrin
         if (Stage(driver.path, folder)) {
             LOGI("nvngx_dlss.dll: {} from the driver ({})", VersionString(driver.version), driver.path.string());
             if (hasLocal)
-                LOGI("{} is {} and stays unused", local.string(), VersionString(localVersion));
+                LOGD("{} is {} and stays unused", local.string(), VersionString(localVersion));
             return folder.wstring();
         }
     }

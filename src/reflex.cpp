@@ -219,7 +219,7 @@ IUnknown* DeviceOf(IDXGISwapChain* swapChain, bool dx12) {
         hr = swapChain->GetDevice(IID_PPV_ARGS(&device));
         if (SUCCEEDED(hr)) return device.Get();
     }
-    LOGI("NVIDIA Reflex: the swap chain did not give its device ({:#x})", static_cast<unsigned>(hr));
+    LOGD("NVIDIA Reflex: the swap chain did not give its device ({:#x})", static_cast<unsigned>(hr));
     return nullptr;
 }
 
@@ -289,7 +289,7 @@ void Attach(const Settings& wanted) {
         std::lock_guard lock(g_settingsMutex);
         g_applyPending = true;
     }
-    LOGI("NVIDIA Reflex: {} swap chain {}, device {}, render thread events {} / {}", *dx12 ? "D3D12" : "D3D11",
+    LOGD("NVIDIA Reflex: {} swap chain {}, device {}, render thread events {} / {}", *dx12 ? "D3D12" : "D3D11",
          static_cast<void*>(swapChain), static_cast<void*>(device), events.start, events.done);
 }
 
