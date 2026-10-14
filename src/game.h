@@ -28,6 +28,7 @@ struct Jitter {
     float x = 0.0f;
     float y = 0.0f;
     uint64_t frame = 0;
+    bool cut = false;  // the camera jumped since the previous frame: DLSS history must not be used
 };
 
 // Finds the game globals and hooks the TAA filter. Safe to call under the loader lock. The hooks

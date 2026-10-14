@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
 
@@ -31,6 +32,16 @@ constexpr uint32_t kViewSkipsTaa = (1u << 0x12) | (1u << 0x17);
 constexpr ptrdiff_t kDeviceDlssContext = 0x42700;
 constexpr ptrdiff_t kCameraJitter = 0x38;
 constexpr ptrdiff_t kCameraJitterFrame = 0x40;  // render frame the jitter was set in
+// The camera's viewports (8 at +0x50, 0x1a0 bytes each). Its draw (+0x228e770) runs the camera
+// setup for each active viewport and then builds that viewport's scene pass, the TAA pass with it.
+constexpr ptrdiff_t kCameraViewports = 0x50;
+constexpr ptrdiff_t kViewportStride = 0x1a0;
+constexpr int kViewportCount = 8;
+constexpr ptrdiff_t kViewportTarget = 0x18;  // own render target; null for the screen
+constexpr ptrdiff_t kViewportActive = 0x20;
+constexpr ptrdiff_t kViewportPass = 0x25;    // 0 = main
+constexpr ptrdiff_t kViewportView = 0xa0;    // view matrix (row vectors), unjittered
+constexpr ptrdiff_t kViewportProj = 0xe0;    // projection, unjittered
 constexpr ptrdiff_t kTaaHistory = 0x168;   // three texture objects, indexed by frame % 3
 constexpr ptrdiff_t kTaaSharpen = 0x187;   // mSharpen: TAA sharpen pass; the history slot shifts by one
 constexpr ptrdiff_t kTextureNative = 0x60;
@@ -70,6 +81,11 @@ constexpr ptrdiff_t kSceneAaSetterDisp = 29;
 constexpr std::string_view kSslrResolveSelectPattern =
     "44 0F B6 8E ?? ?? ?? ?? 85 C0 44 0F B6 86 ?? ?? ?? ?? 0F B6 96 ?? ?? ?? ?? 0F 94 C1 88 5C 24 20 E8";
 constexpr ptrdiff_t kSslrGBufferJitterDisp = 21;
+// Material sampler resolve (in +0x2383400): reads the scene's mSamplerLodBias (a bank number) and
+// takes the sampler from that bank. Only searched for the offset of mSamplerLodBias.
+constexpr std::string_view kSamplerBankPattern =
+    "48 8B 05 ?? ?? ?? ?? 8B D2 8B 88 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 8C C8 88 24 00 00";
+constexpr ptrdiff_t kSamplerBankDisp = 11;
 // Paired getters "is DX11" / "is DX12" reading the same global byte.
 constexpr std::string_view kApiFlagPattern =
     "80 3D ?? ?? ?? ?? 00 0F 94 C0 C3 CC CC CC CC CC 0F B6 05 ?? ?? ?? ?? C3";
@@ -106,7 +122,8 @@ uint8_t** g_renderer = nullptr;
 uint8_t** g_camera = nullptr;
 uint8_t** g_scene = nullptr;
 const uint8_t* g_apiFlag = nullptr;
-// Halton(2,3) table the TAA update picks the jitter from (20 entries, float2).
+// Halton(2,3) table the TAA update picks the jitter from (20 entries, float2; the count is a
+// constant in the code, +0x227db60).
 constexpr ptrdiff_t kSceneHalton = 0xe6a0;
 constexpr uint64_t kHaltonCount = 20;
 
@@ -149,6 +166,8 @@ struct HookSettings {
     std::atomic<float> debugJitterX{0.0f};
     std::atomic<float> debugJitterY{0.0f};
     std::atomic<bool> reflectionFix{true};
+    std::atomic<int> jitterPhases{-1};
+    std::atomic<float> mipBias{std::numeric_limits<float>::quiet_NaN()};
 };
 HookSettings g_settings;
 // Until the NGX side is installed the hooks only call the game's functions.
@@ -164,6 +183,84 @@ struct JitterRecord {
 std::mutex g_jitterMutex;
 std::array<JitterRecord, 8> g_jitterRecords;
 size_t g_jitterNext = 0;
+
+// Camera cuts. The game only asks DLSS for a reset when it rebuilds the TAA history (render size
+// changes, loading); a cut in a cutscene keeps the history, and DLSS then blends the previous shot
+// into the first frames of the new one. A cut is a jump of the main viewport's camera between two
+// frames: position, view direction or projection.
+constexpr float kCutDistance = 500.0f;     // world units (centimetres)
+constexpr float kCutTurnCos = 0.7071f;     // 45 degrees
+constexpr float kCutProjection = 0.05f;    // relative change of the projection's x/y scale
+
+struct CameraShot {
+    std::array<float, 3> position{};
+    std::array<float, 3> forward{};
+    std::array<float, 2> scale{};
+};
+uint64_t g_cutFrame = 0;  // renderer frame of the last camera read
+bool g_cutFrameIsCut = false;
+std::optional<CameraShot> g_lastShot;
+std::atomic<uint64_t> g_cuts{0};
+
+// The main viewport (active, pass 0, drawn to the screen) of the camera, as position, view direction
+// and projection scale. View matrices are row-vector (world * V), so V = [R 0; t 1] and the camera
+// position is -t * R^T.
+std::optional<CameraShot> ReadShot(uint8_t* camera) {
+    for (int i = 0; i < kViewportCount; ++i) {
+        uint8_t* vp = camera + kCameraViewports + i * kViewportStride;
+        auto active = mem::SafeRead<uint8_t>(vp + kViewportActive);
+        auto pass = mem::SafeRead<uint8_t>(vp + kViewportPass);
+        auto target = mem::SafeRead<void*>(vp + kViewportTarget);
+        if (!active || !*active || !pass || *pass != 0 || !target || *target) continue;
+        auto view = mem::SafeRead<std::array<float, 16>>(vp + kViewportView);
+        auto proj = mem::SafeRead<std::array<float, 16>>(vp + kViewportProj);
+        if (!view || !proj) return std::nullopt;
+        const auto& v = *view;
+        CameraShot shot;
+        for (int j = 0; j < 3; ++j) {
+            shot.position[j] = -(v[12] * v[j * 4 + 0] + v[13] * v[j * 4 + 1] + v[14] * v[j * 4 + 2]);
+            shot.forward[j] = v[j * 4 + 2];
+        }
+        shot.scale = {(*proj)[0], (*proj)[5]};
+        bool finite = std::ranges::all_of(v, [](float x) { return std::isfinite(x); }) &&
+                      std::isfinite(shot.scale[0]) && std::isfinite(shot.scale[1]);
+        if (!finite) return std::nullopt;
+        return shot;
+    }
+    return std::nullopt;
+}
+
+// Whether the camera of renderer frame `frame` cut away from the previous frame's. Called under
+// g_jitterMutex from every TAA pass build; the camera is read once per frame.
+bool CameraCut(uint8_t* camera, uint64_t frame) {
+    if (frame == g_cutFrame) return g_cutFrameIsCut;
+    std::optional<CameraShot> shot = ReadShot(camera);
+    bool consecutive = frame == g_cutFrame + 1;
+    g_cutFrame = frame;
+    g_cutFrameIsCut = false;
+    if (shot && g_lastShot && consecutive) {
+        const CameraShot& a = *g_lastShot;
+        const CameraShot& b = *shot;
+        float d2 = 0.0f, dot = 0.0f, la = 0.0f, lb = 0.0f;
+        for (int j = 0; j < 3; ++j) {
+            float d = b.position[j] - a.position[j];
+            d2 += d * d;
+            dot += a.forward[j] * b.forward[j];
+            la += a.forward[j] * a.forward[j];
+            lb += b.forward[j] * b.forward[j];
+        }
+        float cosTurn = la > 0.0f && lb > 0.0f ? dot / std::sqrt(la * lb) : 1.0f;
+        float zoom = 0.0f;
+        for (int j = 0; j < 2; ++j)
+            if (a.scale[j] != 0.0f) zoom = std::max(zoom, std::abs(b.scale[j] / a.scale[j] - 1.0f));
+        g_cutFrameIsCut = d2 > kCutDistance * kCutDistance || cosTurn < kCutTurnCos || zoom > kCutProjection;
+        if (g_cutFrameIsCut && g_cuts.fetch_add(1) < 20)
+            LOGI("camera cut at frame {}: moved {:.0f}, turned {:.0f} degrees, zoom {:.1f}%; DLSS history reset",
+                 frame, std::sqrt(d2), std::acos(std::clamp(cosTurn, -1.0f, 1.0f)) * 57.29578f, zoom * 100.0f);
+    }
+    g_lastShot = shot;
+    return g_cutFrameIsCut;
+}
 
 void CaptureJitter(uint8_t* taa) {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
@@ -205,6 +302,7 @@ void CaptureJitter(uint8_t* taa) {
     }
 
     std::lock_guard lock(g_jitterMutex);
+    rec.jitter.cut = CameraCut(camera, *frame);
     g_jitterRecords[g_jitterNext] = rec;
     g_jitterNext = (g_jitterNext + 1) % g_jitterRecords.size();
 }
@@ -292,8 +390,31 @@ bool EnsureJitter(uint8_t* taa) {
 
 // The game turns the Halton value h into a clip-space offset of h / output size, which moves the
 // image by h / 2 * render scale render pixels: its jitter covers less than half a pixel. With
-// DLSS the camera value is scaled by 2 / render scale right after the TAA update sets it, so the
-// samples spread over a whole render pixel.
+// DLSS the camera value is replaced right after the TAA update sets it, by a sample that moves the
+// image by up to half a render pixel each way, so the samples spread over a whole render pixel.
+//
+// The game's sequence has 20 phases (Halton(2,3) from index 1). DLSS needs 8 per output pixel
+// covered by a render pixel (DLSS guide, 3.7.1): 18 in Quality, 24 in Balanced, 32 in Performance.
+// The plugin's sequence is the same Halton(2,3) with max(20, 8 / scale^2) phases, so DLAA and
+// Quality keep the game's samples.
+float Halton(uint32_t index, uint32_t base) {
+    float f = 1.0f, r = 0.0f;
+    while (index > 0) {
+        f /= static_cast<float>(base);
+        r += f * static_cast<float>(index % base);
+        index /= base;
+    }
+    return r;
+}
+
+uint32_t JitterPhases(float scale) {
+    int setting = g_settings.jitterPhases;
+    if (setting > 0) return static_cast<uint32_t>(setting);
+    if (setting == 0) return static_cast<uint32_t>(kHaltonCount);
+    auto wanted = static_cast<uint32_t>(std::ceil(8.0f / (scale * scale) - 0.01f));
+    return std::max(static_cast<uint32_t>(kHaltonCount), wanted);
+}
+
 void WidenJitter() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
     uint8_t* camera = g_camera ? *g_camera : nullptr;
@@ -303,9 +424,18 @@ void WidenJitter() {
     auto* jitter = reinterpret_cast<float*>(camera + kCameraJitter);
     // Only a value the update has just written; a second filter instance may not rewrite it.
     if (jitter[0] != halton[0] || jitter[1] != halton[1]) return;
-    float factor = 2.0f / RenderScale();
-    jitter[0] *= factor;
-    jitter[1] *= factor;
+    float scale = RenderScale();
+    float factor = 2.0f / scale;
+    uint32_t phases = JitterPhases(scale);
+    if (phases == kHaltonCount) {
+        jitter[0] *= factor;
+        jitter[1] *= factor;
+        return;
+    }
+    uint64_t frame = *reinterpret_cast<uint64_t*>(renderer + kRendererFrame);
+    auto index = static_cast<uint32_t>(frame % phases) + 1;
+    jitter[0] = (Halton(index, 2) - 0.5f) * factor;
+    jitter[1] = (Halton(index, 3) - 0.5f) * factor;
 }
 
 // The scene's anti-aliasing switches, TAA in the low byte and FXAA in the high byte of a word at
@@ -433,6 +563,64 @@ void HoldReflectionJitterOff() {
     }
 }
 
+// Texture mip bias. The game builds 15 sampler banks when it loads its shaders (+0x23d6690): bank 0
+// without bias, banks 1..7 at -log2(2, 2.5, 3, 3.5, 4, 4.5, 5) mip levels, banks 8..14 the same
+// positive. A material takes its samplers from the bank the scene's mSamplerLodBias names
+// (scene + g_sceneSamplerBank) when it is loaded (+0x2383566), so a bank set here applies to areas
+// loaded afterwards. With DLSS the textures should be sampled for the output resolution: NVIDIA
+// recommends log2(render scale) - 1 (the game's own dynamic resolution uses the same), which the
+// banks match closely: DLAA -1, Quality -1.58, Balanced -1.81, Performance -2.
+ptrdiff_t g_sceneSamplerBank = 0;
+std::mutex g_bankMutex;
+uint8_t* g_bankScene = nullptr;
+bool g_bankHeld = false;
+uint32_t g_bankGame = 0;   // the game's own bank, last seen
+uint32_t g_bankOurs = 0;   // the bank the plugin wrote (0 = none)
+
+uint32_t BankFor(float bias) {
+    static const std::array<float, 8> kBias = {0.0f,           -1.0f,          -std::log2(2.5f), -std::log2(3.0f),
+                                               -std::log2(3.5f), -std::log2(4.0f), -std::log2(4.5f), -std::log2(5.0f)};
+    uint32_t best = 0;
+    for (uint32_t i = 1; i < kBias.size(); ++i)
+        if (std::abs(kBias[i] - bias) < std::abs(kBias[best] - bias)) best = i;
+    return best;
+}
+
+void HoldMipBias() {
+    uint8_t* scene = g_scene ? *g_scene : nullptr;
+    if (!scene || !g_sceneSamplerBank) return;
+    std::lock_guard lock(g_bankMutex);
+    if (scene != g_bankScene) {
+        g_bankScene = scene;
+        g_bankHeld = false;
+        g_bankOurs = 0;
+    }
+    auto* bank = reinterpret_cast<volatile uint32_t*>(scene + g_sceneSamplerBank);
+    uint32_t current = *bank;
+    if (g_bankOurs && current != g_bankOurs) g_bankOurs = 0;  // the game has set it since
+    float bias = g_settings.mipBias;
+    float scale = RenderScale();
+    if (std::isnan(bias)) bias = std::log2(scale) - 1.0f;
+    uint32_t wanted = BankFor(bias);
+    if (DlssEnabledInGame() && !Bypassed() && !g_dlssUnavailable && wanted != 0) {
+        if (current != wanted) {
+            if (!g_bankOurs) g_bankGame = current;
+            *bank = wanted;
+            g_bankOurs = wanted;
+            LOGI("textures: mip bias bank {} ({:.2f} levels, render scale {:.3f}) for areas loaded from now on",
+                 wanted, -std::log2(1.5f + 0.5f * static_cast<float>(wanted)), scale);
+        }
+        g_bankHeld = true;
+    } else if (g_bankHeld) {
+        g_bankHeld = false;
+        if (g_bankOurs) {
+            *bank = g_bankGame;
+            g_bankOurs = 0;
+            LOGI("textures: the game's mip bias bank {} for areas loaded from now on", g_bankGame);
+        }
+    }
+}
+
 // The pass can be built on two threads at once for the same filter, so the TAA sharpen flag is
 // cleared by the first build that starts and restored by the last one that ends.
 struct SharpenHold {
@@ -483,6 +671,7 @@ void* __fastcall HookTaaUpdate(void* self) {
     if (g_updateCallback) g_updateCallback();
     HoldTaaOnly();
     HoldReflectionJitterOff();
+    HoldMipBias();
     if (!DlssEnabledInGame() || Bypassed()) return g_origTaaUpdate(self);
     auto* taa = static_cast<uint8_t*>(self);
     auto* enable = taa + kTaaJitterEnable;
@@ -644,6 +833,17 @@ bool Init() {
         LOGW("game: reflection technique choice matched {} times; ReflectionFix has no effect", sslrSelect.size());
     }
 
+    auto samplerBank = mem::FindPattern(*text, kSamplerBankPattern);
+    if (samplerBank.size() == 1 && mem::RipTarget(samplerBank[0] + 3, samplerBank[0] + 7) == reinterpret_cast<uint8_t*>(g_scene)) {
+        int32_t offset;
+        std::memcpy(&offset, samplerBank[0] + kSamplerBankDisp, sizeof(offset));
+        g_sceneSamplerBank = offset;
+        LOGI("game: sampler bank at scene +{:#x} (+{:#x})", offset, Rva(samplerBank[0]));
+    } else {
+        LOGW("game: material sampler resolve matched {} times; the texture mip bias stays the game's",
+             samplerBank.size());
+    }
+
     auto apiFlag = mem::FindPattern(*text, kApiFlagPattern);
     if (apiFlag.size() == 1) {
         g_apiFlag = mem::RipTarget(apiFlag[0] + 0x13, apiFlag[0] + 0x17);
@@ -730,6 +930,8 @@ void ApplyConfig(const Config& config) {
     g_settings.debugJitterX = config.debugJitterX;
     g_settings.debugJitterY = config.debugJitterY;
     g_settings.reflectionFix = config.reflectionFix;
+    g_settings.jitterPhases = config.jitterPhases;
+    g_settings.mipBias = config.mipBias;
 }
 
 void Activate(const Config& config) {

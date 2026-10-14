@@ -637,7 +637,8 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     float scale = game::RenderScale();
     in.jitterX = (jitter ? jitter->x : 0.0f) * g_config.jitterScaleX * scale;
     in.jitterY = (jitter ? jitter->y : 0.0f) * g_config.jitterScaleY * scale;
-    in.reset = GetI(p, NVSDK_NGX_Parameter_Reset);
+    // The game resets only when it rebuilds the TAA history; camera cuts come from the camera.
+    in.reset = GetI(p, NVSDK_NGX_Parameter_Reset) || (jitter && jitter->cut && g_config.cutReset);
     if (f.resetNext) {
         f.resetNext = false;
         in.reset = 1;

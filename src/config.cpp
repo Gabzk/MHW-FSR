@@ -245,6 +245,11 @@ void LoadConfig(const std::wstring& ini) {
     c.forceJitter = ReadBool(ini, L"Advanced", L"ForceJitter", c.forceJitter);
     c.fullPixelJitter = ReadBool(ini, L"Advanced", L"FullPixelJitter", c.fullPixelJitter);
     c.reflectionFix = ReadBool(ini, L"Advanced", L"ReflectionFix", c.reflectionFix);
+    c.cutReset = ReadBool(ini, L"Advanced", L"CutReset", c.cutReset);
+    c.jitterPhases = std::clamp(static_cast<int>(ReadFloat(ini, L"Advanced", L"JitterPhases", -1.0f)), -1, 256);
+    auto mipBias = Lower(ReadString(ini, L"Advanced", L"MipBias", L"auto"));
+    if (mipBias == L"off") c.mipBias = 0.0f;
+    else if (mipBias != L"auto") c.mipBias = std::clamp(ReadFloat(ini, L"Advanced", L"MipBias", 0.0f), -3.0f, 0.0f);
     c.hdr = static_cast<int>(ReadFloat(ini, L"Advanced", L"HDR", static_cast<float>(c.hdr)));
     c.exposureScale = ReadFloat(ini, L"Advanced", L"ExposureScale", c.exposureScale);
     c.preExposure = ReadFloat(ini, L"Advanced", L"PreExposure", c.preExposure);

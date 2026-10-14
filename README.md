@@ -179,10 +179,11 @@ and the game is back to normal. The technical details are in
 ## Known limitations
 
 - In Quality, Balanced and Performance, DLSS upscales the image after the game's post-processing
-  (depth of field, motion blur, bloom), where the game's own DLSS 1 sat. DLSS is designed to work
+  (depth of field, motion blur, tone mapping), where the game's own DLSS 1 sat. DLSS is designed to work
   before those effects, so the upscaling modes can't look quite as good as in games built for
   current DLSS.
-- In the upscaling modes, textures are slightly softer than they could be.
+- Texture sharpness follows the mode of the area you loaded: after changing `Mode` while playing,
+  textures get the new sharpness at the next area change (or after a restart).
 - In DLAA, the game's own TAA still runs underneath and its result is thrown away. That costs a
   fraction of a millisecond.
 

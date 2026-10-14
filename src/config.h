@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <string>
 
 #include "log.h"
@@ -62,6 +63,13 @@ struct Config {
     // Hold the game's 2x2 reflection history swap (the scene's mSSLRGBufferJitter) off while DLSS
     // runs (see game.cpp).
     bool reflectionFix = true;
+    bool cutReset = true;         // reset the DLSS history on camera cuts (the game does not)
+    // Jitter phases while DLSS runs: -1 = from the render scale (8 / scale^2, at least the game's
+    // 20), 0 = the game's 20-entry sequence, otherwise that many.
+    int jitterPhases = -1;
+    // Texture mip bias while DLSS runs, in mip levels: NaN = log2(render scale) - 1 (NVIDIA's
+    // recommendation), 0 = the game's own. The game has banks for 0, -1 and -log2(2.5 .. 5).
+    float mipBias = std::numeric_limits<float>::quiet_NaN();
     int hdr = -1;                 // -1 = from the game / input format, 0 or 1 = force
     float exposureScale = 1.0f;
     float preExposure = 1.0f;

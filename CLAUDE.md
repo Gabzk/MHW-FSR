@@ -2,7 +2,7 @@
 
 DLSS 4 for Monster Hunter: World (Iceborne, game version 15.2x, tested on 15.23), as a native
 plugin DLL loaded by Stracker's Loader from `nativePC\plugins`. C++20, MSVC, CMake + Ninja.
-Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.9.1 at the time of writing).
+Current version: see `project(... VERSION ...)` in `CMakeLists.txt` (0.9.2 at the time of writing).
 Releases are git tags (`v0.8.2`) with the zip attached as a GitHub release; the repo is private on
 GitHub (`odt1/MHW-DLSS4`). Licence: BSD-2-Clause (`LICENSE`, "Copyright (c) 2026, odt1"), for the
 project's own code. No copyleft code or licence: the DLSS SDK licence (4e) forbids using the SDK in a
@@ -216,6 +216,20 @@ Before changing source, keep a copy of the last released `src/`
     scales that up (4x4 screen pixels in Performance): the "pixelated, shimmering" weapon/metal
     reflections. The plain resolve is the same shader without the fetch offset (RenderDoc diff), so
     no shader is replaced. Measurements in docs/technical.md (Reflections).
+14. **Camera-cut reset (0.9.2).** The game resets DLSS only on a TAA history rebuild (`taa+0x185`,
+    render size change, loading). `CaptureJitter` (TAA pass build) reads the main viewport of
+    `sCamera` once per renderer frame (`CameraCut`) and marks the jitter record `cut` when the camera
+    moved > 500 units, turned > 45 degrees or the projection scale changed > 5%; `EvaluateAtTaa` ORs
+    it into `Reset`, the DLISP call inherits it. Developer key `CutReset`.
+15. **Jitter phases (0.9.2).** `WidenJitter` writes Halton(2,3) from index 1 with
+    max(20, ceil(8 / scale^2)) phases instead of scaling the game's 20-entry table (kept as is for
+    20: DLAA, Quality). Developer key `JitterPhases`.
+16. **Texture mip bias (0.9.2).** `HoldMipBias` (TAA update) holds the scene's `mSamplerLodBias`
+    (+0x1a8, a sampler bank number) at the bank nearest log2(render scale) - 1 while DLSS runs and
+    gives the game's value back afterwards. Materials bake the bank when they load, so it reaches
+    areas loaded afterwards (set at the title, so the first area has it). Developer key `MipBias`
+    (`Auto`, `Off`, levels). Pure data write, the offset is read from the material resolve
+    (`kSamplerBankPattern`).
 
 ### Threads (0.7.3)
 
@@ -259,7 +273,8 @@ Globals: renderer `0x1451c4480`, scene `0x1451c4368`, camera `0x1451c4400`, unit
 `0x1451cc080`.
 
 Renderer fields: +0x78 device (device+0x42700 DLSS context, +0x42718 ready, +0x1400 D3D11 context),
-+0xa5 DLSS on, +0xa6 DLISP on, +0xa8 mode (2 = DLSS on), +0xac user sharpness, +0xb0 DLSS scale,
++0xa5 DLSS on, +0xa6 DLISP on (both only written by the renderer constructor, as 1: the real switches
+are +0xb4 and device+0x42718), +0xa8 mode (2 = DLSS on), +0xac user sharpness, +0xb0 DLSS scale,
 +0xb4 DLSS type (1 = DLSS at 1.0, 3 = DLSS + DLISP below 1.0), +0x200/+0x204 render scale
 requested/applied, +0x1f208 render frame, +0x1f210 frame, +0x1f450 view (+0x58 flags: bits 0x12 /
 0x17 skip TAA). Plugin test: DLSS enabled = +0xa5 && (+0xb4 & 1); DLISP active = +0xa6 && (+0xb4 & 2)
@@ -356,6 +371,28 @@ Frame pipeline (observed in BN, confirmed by the Reflex markers' timing):
   conditions on player state (+0x76b0 -> +0x9f8, +0x6274, +0x6278). It changes buffering, not when
   input is read.
 
+Camera: `sCamera` `0x1451c4400`, +0x38 jitter, +0x40 jitter frame, 8 viewports at +0x50 (0x1a0 each:
++0x18 own target, +0x20 active, +0x25 pass, +0xa0 view, +0xe0 proj, +0x120/+0x160 previous copies;
+row vectors). Camera update (vtable +0x30, `0x14228eb60`) copies current to previous, then computes
+the new matrices; camera draw (`0x14228e770`) runs the camera setup `0x14228f3b0` per active viewport
+and then that viewport's scene pass `0x1423c3790`. Jitter: TAA update `0x1423931e0` -> setJitter
+`0x14228f390` with the scene table entry `0x14227db60` (frame % 20, scene +0xe6a0 = Halton(2,3)
+indices 20..39 minus 0.5).
+
+Sampler banks: built once at shader package load (`0x1423d6690`, 15 banks of 63 samplers at
+`[0x1451c73d0]+0x2488`): 0 no bias, 1..7 -log2(2, 2.5, 3, 3.5, 4, 4.5, 5), 8..14 positive; dynamic
+resolution groups use log2(level) + log2(0.5). Material resolve `0x142383400` reads scene +0x1a8
+(`mSamplerLodBias`) for the first 12 samplers (`0x142383566`).
+
+Render scale paths: with DLSS the options apply (`0x14043e04a`, `0x14043e424`) calls `0x14229bed0`
+(stores scale and type at +0xb0/+0xb4, +0x200 = clamp(+0xc4 * scale, 0.5, 1), no rounding). The
+16-aligning setter `0x14229be60` is only referenced from the renderer's property table.
+
+DX12 pacing: main thread proc -> `0x14229b020` -> (DX12) `0x1423ade30`: WaitForSingleObjectEx(frame
+latency waitable object device+0x10f0, 1000 ms) unless latch device+0x10da (set by one timeout,
+never cleared); `SetMaximumFrameLatency` at `0x1423a6553`. Pass order (other mod's notes): bloom
+before TAA; DOF, motion blur, tone mapping, FXAA before the DLISP point.
+
 Driver DLSS store: `%ProgramData%\NVIDIA\NGX\models\dlss\versions\<(maj<<16)|(min<<8)|patch>\files\
 <id>.bin`; MHW's own OTA entries are app B9D2F5C (DLSS 1.2.110), the NVIDIA App override build is
 app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the newest >= 3 to
@@ -420,6 +457,9 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
   whichever limiter; DLSS adds none).
   0.9.1 reflection fix (SSLR 2x2 history swap held off while DLSS runs; developer key
   `ReflectionFix`).
+  0.9.2 camera-cut reset, jitter phases per mode and texture mip bias through the game's sampler
+  banks (findings of Gargauth/mhworld-dlss, GPL-3.0, re-checked in BN; no code
+  taken).
 - Input lag measured in the hub with the harness (docs/technical.md): the game's 60 cap never worse
   than the driver's; a user report of the opposite was closed as a fluke. Not measured: hunts.
 - Not exercised by tests: the NGX shutdown path (only at game exit; the test runs kill the game)
@@ -432,5 +472,11 @@ app E658700; `models\nvngx_config.txt` lists versions. The plugin copies the new
   resolution (hard-coded, see the RE reference), so they stay softer than the rest in the upscaling
   modes. The checkerboard on planks and near the camera is the game's dithered transparency, not
   a bug (the user's call).
-- Known limitations: in the upscaling modes DLSS sees the frame after post-processing; texture mip
-  bias is not lowered; the game's TAA still runs under DLSS in DLAA (result discarded).
+- Known limitations: in the upscaling modes DLSS sees the frame after post-processing (depth of
+  field, motion blur, tone mapping; bloom comes before TAA); a Mode change at run time reaches the
+  texture mip bias only at the next area load; the game's TAA still runs under DLSS in DLAA (result
+  discarded).
+- Not exercised by tests: camera-cut reset in a cutscene (only the title-to-hub switch and mouse
+  sweeps were seen).
+- Checked and dropped (docs/technical.md, Other checks): IsHDR at the DLISP position (no measurable
+  difference), the 16-aligned render width at 0.5 (not on the DLSS path).

@@ -20,7 +20,8 @@ its application id. The plugin is loaded later (with the input system) and:
 3. At the game's DLSS 1 call inside the TAA pass, runs DLSS with the game's colour, dense motion
    vectors and depth copy, plus the camera jitter recorded when the pass was built. The game's
    jitter only covers a fraction of a pixel and scene parameters sometimes switch it off, so the
-   plugin keeps it on and widens it to a full render pixel while DLSS runs.
+   plugin keeps it on and widens it to a full render pixel while DLSS runs, with more phases in
+   the upscaling modes (see [Jitter, history reset and texture sharpness](#jitter-history-reset-and-texture-sharpness)).
 4. In the upscaling modes the TAA-position call passes the jittered frame through and DLSS runs
    where the game calls DLISP, its old upscaler, after post-processing. That is the only place the
    game's pipeline changes resolution.
@@ -43,6 +44,9 @@ its application id. The plugin is loaded later (with the input system) and:
 10. Adds NVIDIA Reflex (see below), independent of DLSS.
 11. Switches the game's screen-space reflections to the version of their temporal filter that
     does not work in 2x2 pixel blocks while DLSS runs (see [Reflections](#reflections)).
+12. Resets the DLSS history on camera cuts, which the game does not, and picks the game's sampler
+    bank with the texture mip bias NVIDIA recommends for the render scale (see
+    [Jitter, history reset and texture sharpness](#jitter-history-reset-and-texture-sharpness)).
 
 The game builds the TAA pass on worker threads, twice per frame and at the same time, and runs
 the TAA update once per frame on the main thread. The plugin reloads its ini and asks the game to
@@ -191,6 +195,85 @@ confirmed the fix in the hub and saw no performance cost. The offset of the swit
 the technique choice in `+0x2286260` (pattern `kSslrResolveSelectPattern`).
 `tools/live/sslrpeek.py` reads and sets it in the running game.
 
+## Jitter, history reset and texture sharpness
+
+Static analysis in Binary Ninja of the 15.23 exe (`re\MonsterHunterWorld.exe.unpacked.exe`), checked in
+the running game where noted. Prompted by the RE notes of another DLSS mod for this game
+(Gargauth/mhworld-dlss, GPL-3.0: only its findings were used, re-checked here, no code).
+
+### Camera cuts
+
+The game asks DLSS for a reset only in its DLSS 1 call at the TAA position: `Reset` = the TAA
+filter's history-invalid byte (`+0x185`) or a blend rate of 0. The byte is set when the TAA history
+is rebuilt (`+0x2391f30`: render size changes, loading) and when the render scale changed this
+frame. No write of it was found for camera cuts (searched: every write of `+0x185`; whether the game
+has another path is unknown). So after a cut in a cutscene DLSS would keep blending the previous
+shot into the new one for a few frames.
+
+The plugin compares the camera of consecutive frames itself. `sCamera` (`0x1451c4400`) holds 8
+viewports at `+0x50`, `0x1a0` bytes each (`+0x18` own render target, `+0x20` active, `+0x25` pass,
+`+0xa0` view matrix, `+0xe0` projection, `+0x120`/`+0x160` last frame's copies). Its draw
+(`+0x228e770`) runs the camera setup for each active viewport and then builds that viewport's scene
+pass, so the TAA pass build reads the matrices of its own frame. The plugin reads the main viewport
+(active, pass 0, no own target) once per renderer frame when the TAA pass is built and records a cut
+with the jitter: position moved more than 500 units (cm), view turned more than 45 degrees, or the
+projection scale changed more than 5%. The cut is ORed into the game's `Reset` at the TAA position
+and carried to the DLISP call. Observed in the hub (Performance, 240 fps): the title-to-hub switch
+was a cut (5359 units, 101 degrees); walking and normal camera moves were none; very fast mouse
+sweeps from the harness (70-145 degrees per frame) were cuts, which leave almost nothing of the
+previous frame on screen anyway. Not yet seen in a cutscene. Developer key `CutReset=0` turns it off.
+
+### Jitter phases
+
+The TAA update (`+0x23931e0`) gives the camera entry `frame % 20` of a table in the scene
+(`+0xe6a0`, Halton(2,3) indices 20..39 minus 0.5, read in the running game; the 20 is a constant in
+the code at `+0x227db60`). The DLSS guide (3.7.1) asks for 8 phases per output pixel a render pixel
+covers: 18 in Quality, 24 in Balanced, 32 in Performance. The plugin already replaces the camera
+value after the update (`FullPixelJitter`), so it now writes Halton(2,3) from index 1 with
+max(20, ceil(8 / scale^2)) phases: DLAA and Quality keep the game's table, Balanced gets 24 and
+Performance 32 (checked in the running game: Performance frame 9235 got index 20, times 2 / 0.5).
+Developer key `JitterPhases`: -1 automatic, 0 the game's 20, N fixed.
+
+### Texture mip bias
+
+The game builds 15 sampler banks when it loads its shader package (`+0x23d6690`): bank 0 without
+bias, banks 1-7 at -log2(2, 2.5, 3, 3.5, 4, 4.5, 5) mip levels, banks 8-14 the same positive. A
+material takes its samplers from the bank named by the scene's `mSamplerLodBias` (scene `+0x1a8`)
+when it is loaded (`+0x2383566`); the game's constructor sets 0. The DLSS guide (3.5) recommends a
+bias of log2(render / display) - 1 (the game's own dynamic resolution uses log2(level) + log2(0.5)
+the same way), and the banks match it closely: DLAA bank 1 (-1), Quality bank 3 (-1.58), Balanced
+bank 4 (-1.81 for -1.79), Performance bank 5 (-2). So while DLSS runs the plugin holds that bank
+number (from the TAA update, like the other holds) and gives the game's value back when DLSS stops;
+no code is changed. Only materials loaded afterwards use it: the bank is set at the title screen, so
+the first area gets it, and a Mode change at run time reaches the textures at the next area change.
+The game did not change the value when the hub loaded.
+
+Measured in the hub (2560x1440, same spawn point, restart per variant): Performance, texture detail
+(mean Laplacian) +33% with the bias, close to DLAA without it; frame-to-frame change with a still
+camera +5-10% (idle animations included). DLAA: +2% detail. Developer key `MipBias`: `Auto`, `Off`
+(the game's bank), or a bias in levels (the nearest bank).
+
+### Other checks
+
+- `IsHDR` at the DLISP position: the input there is after tone mapping (maximum about 1.4), and the
+  flag is set because the texture is a float format. Measured in one session (Performance, hub, same
+  spot): with `HDR=0` brightness and detail were within 1-2% of the default (background mean 44.3
+  against 44.5, detail 14.53 against 14.71), so the flag stays.
+- Render size in Performance at widths whose half is not a multiple of 16 (3440, 1366): the
+  aligning ratio setter `+0x229be60` (clamp to 0.5, then round the width down to a multiple of 16)
+  is only referenced from the renderer's property table. With DLSS on, the game applies the scale
+  through `+0x229bed0`, which clamps to [0.5, 1] without rounding, so the size mismatch that setter
+  can cause does not apply here (not tested on such a display).
+- Pass order (filter sort keys, from the other mod's notes, not re-checked): bloom runs before the
+  TAA pass; then depth of field, motion blur, tone mapping and colour grading, FXAA, and the DLISP
+  point. So in the upscaling modes DLSS sees the frame after depth of field, motion blur and tone
+  mapping; bloom is already in the TAA input.
+- DX12 frame pacing: before each update of the main object the main thread waits up to 1 s for the
+  swap chain's frame latency waitable object (`+0x23ade30`, called from `+0x229b020` in DX12 only;
+  the swap chain's `SetMaximumFrameLatency` is called at `+0x23a6553`). A single timeout sets a latch
+  (device `+0x10da`) that switches the wait off until the game exits. The plugin's Reflex sleep comes
+  after it. Not measured separately; the latency measurements above include it.
+
 ## Graphics debugging
 
 The game exe restarts itself through Steam when it is started directly (Steam DRM), so launchers of
@@ -244,6 +327,9 @@ first group in them.
 | `ForceJitter` | 1 | Keep the camera jitter on while DLSS runs (some scenes switch it off). |
 | `FullPixelJitter` | 1 | Widen the game's half-pixel jitter to a full render pixel while DLSS runs. |
 | `ReflectionFix` | 1 | Hold the game's 2x2 reflection history swap off while DLSS runs (see [Reflections](#reflections)); 0 = the game's reflections, for comparisons. |
+| `CutReset` | 1 | Reset the DLSS history on camera cuts (see [Camera cuts](#camera-cuts)). |
+| `JitterPhases` | -1 | Jitter phases while DLSS runs: -1 = max(20, 8 / scale^2), 0 = the game's 20, N = N (see [Jitter phases](#jitter-phases)). |
+| `MipBias` | Auto | Texture mip bias while DLSS runs: `Auto` = log2(render scale) - 1, `Off` = the game's, or levels (the nearest of the game's banks; see [Texture mip bias](#texture-mip-bias)). Reaches areas loaded afterwards. |
 | `HDR` | -1 | DLSS IsHDR flag: -1 from the game, 0 or 1 forced. |
 | `ExposureScale`, `PreExposure` | 1 | Passed to DLSS evaluate as is. |
 | `NGXLogging` | 0 | NGX's own log lines in `MHW-DLSS4.log`. |
