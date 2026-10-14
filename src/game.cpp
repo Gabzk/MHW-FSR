@@ -186,8 +186,9 @@ size_t g_jitterNext = 0;
 
 // Camera cuts. The game only asks DLSS for a reset when it rebuilds the TAA history (render size
 // changes, loading); a cut in a cutscene keeps the history, and DLSS then blends the previous shot
-// into the first frames of the new one. A cut is a jump of the main viewport's camera between two
-// frames: position, view direction or projection.
+// into the first frames of the new one. A cut is a jump of the main viewport's camera since the last
+// frame that built the TAA pass: position, view direction or projection. Frames without a TAA pass
+// in between don't hide a cut; DLSS had no new input then, so a jump across them needs a reset too.
 constexpr float kCutDistance = 500.0f;     // world units (centimetres)
 constexpr float kCutTurnCos = 0.7071f;     // 45 degrees
 constexpr float kCutProjection = 0.05f;    // relative change of the projection's x/y scale
@@ -196,11 +197,14 @@ struct CameraShot {
     std::array<float, 3> position{};
     std::array<float, 3> forward{};
     std::array<float, 2> scale{};
+    int viewport = 0;
 };
 uint64_t g_cutFrame = 0;  // renderer frame of the last camera read
 bool g_cutFrameIsCut = false;
 std::optional<CameraShot> g_lastShot;
+int g_shotViewport = -2;  // viewport of the last read, -1 none, -2 not read yet
 std::atomic<uint64_t> g_cuts{0};
+int g_viewportLogs = 0;
 
 // The main viewport (active, pass 0, drawn to the screen) of the camera, as position, view direction
 // and projection scale. View matrices are row-vector (world * V), so V = [R 0; t 1] and the camera
@@ -217,6 +221,7 @@ std::optional<CameraShot> ReadShot(uint8_t* camera) {
         if (!view || !proj) return std::nullopt;
         const auto& v = *view;
         CameraShot shot;
+        shot.viewport = i;
         for (int j = 0; j < 3; ++j) {
             shot.position[j] = -(v[12] * v[j * 4 + 0] + v[13] * v[j * 4 + 1] + v[14] * v[j * 4 + 2]);
             shot.forward[j] = v[j * 4 + 2];
@@ -235,10 +240,19 @@ std::optional<CameraShot> ReadShot(uint8_t* camera) {
 bool CameraCut(uint8_t* camera, uint64_t frame) {
     if (frame == g_cutFrame) return g_cutFrameIsCut;
     std::optional<CameraShot> shot = ReadShot(camera);
-    bool consecutive = frame == g_cutFrame + 1;
+    int viewport = shot ? shot->viewport : -1;
+    if (viewport != g_shotViewport && g_viewportLogs < 20) {
+        ++g_viewportLogs;
+        if (shot)
+            LOGI("camera: main viewport {} (cut detection on)", viewport);
+        else
+            LOGI("camera: no main viewport (active, pass 0, drawn to the screen); camera cuts are not "
+                 "detected until one is back");
+    }
+    g_shotViewport = viewport;
     g_cutFrame = frame;
     g_cutFrameIsCut = false;
-    if (shot && g_lastShot && consecutive) {
+    if (shot && g_lastShot) {
         const CameraShot& a = *g_lastShot;
         const CameraShot& b = *shot;
         float d2 = 0.0f, dot = 0.0f, la = 0.0f, lb = 0.0f;
@@ -393,10 +407,10 @@ bool EnsureJitter(uint8_t* taa) {
 // DLSS the camera value is replaced right after the TAA update sets it, by a sample that moves the
 // image by up to half a render pixel each way, so the samples spread over a whole render pixel.
 //
-// The game's sequence has 20 phases (Halton(2,3) from index 1). DLSS needs 8 per output pixel
+// The game's sequence has 20 phases (Halton(2,3) indices 20..39). DLSS needs 8 per output pixel
 // covered by a render pixel (DLSS guide, 3.7.1): 18 in Quality, 24 in Balanced, 32 in Performance.
-// The plugin's sequence is the same Halton(2,3) with max(20, 8 / scale^2) phases, so DLAA and
-// Quality keep the game's samples.
+// With 20 phases (DLAA, Quality, or JitterPhases=20) the plugin keeps the game's table; otherwise it
+// writes Halton(2,3) from index 1 with max(20, 8 / scale^2) phases. Only with FullPixelJitter.
 float Halton(uint32_t index, uint32_t base) {
     float f = 1.0f, r = 0.0f;
     while (index > 0) {
