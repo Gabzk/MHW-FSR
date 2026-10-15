@@ -113,6 +113,14 @@ To automatically package or deploy into your game installation:
 
 ---
 
+## Credits & Acknowledgments
+
+- **[MHW-DLSS4](https://github.com/odt1/MHW-DLSS4)** by **odt1**: This project is a direct fork and evolution of `MHW-DLSS4`. All original engine reverse-engineering, MT Framework TAA pass hooking, projection matrix analysis, and memory scanning techniques are credited to **odt1**.
+- **[Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982)**: The plugin loader enabling native PC modding for *Monster Hunter: World*.
+- **[AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)**: AMD's open-source graphics technologies (FSR 3.1, FSR 4, and RCAS).
+
+---
+
 ## License
 
-This project is licensed under the MIT License. AMD FidelityFX SDK components are copyright (c) Advanced Micro Devices, Inc. and licensed under the MIT License.
+This project is licensed under the BSD 2-Clause License (matching the original `MHW-DLSS4` license, copyright (c) 2026, odt1). AMD FidelityFX SDK components are copyright (c) Advanced Micro Devices, Inc. and licensed under the MIT License.
