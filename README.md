@@ -50,14 +50,14 @@ The file `nativePC\plugins\MHW-FSR.ini` is hot-reloaded automatically while the 
 
 ```ini
 [General]
-Enabled=1          ; Set to 0 to disable the plugin
+Enabled=1          ; 1 = Plugin enabled, 0 = Disabled completely
 LogLevel=Info      ; Debug, Info, Warn, or Error
 
 [FSR]
 ; Presets: NativeAA, Quality, Balanced, Performance, UltraPerformance, Custom
-QualityPreset=NativeAA
+QualityPreset=Quality
 
-; Custom scale used when QualityPreset=Custom (0.5 to 1.0)
+; Custom scale used when QualityPreset=Custom (0.50 to 1.00)
 RenderScale=1.0
 
 ; Post-upscale RCAS sharpness (0.0 to 1.0). "Game" follows in-game slider
@@ -66,7 +66,7 @@ Sharpness=0.33
 ; Let FSR estimate exposure automatically (0 = off, 1 = on)
 AutoExposure=0
 
-; Upscaler version: Auto (detects best upscaler, e.g. FSR 4 on RDNA 3/4)
+; Upscaler version: Auto (detects best upscaler, e.g. FSR 4 on RDNA 3/4), FSR 4, FSR 3.1, or hex ID
 Version=Auto
 
 ; Custom path to FSR DLLs (leave empty for nativePC\plugins\MHW-FSR\)
