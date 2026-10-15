@@ -1,4 +1,5 @@
 #include "fsr_context.h"
+#include "barrier_batcher.h"
 #include "d3d_util.h"
 #include "fsr_loader.h"
 #include "log.h"
@@ -195,6 +196,12 @@ bool FsrContext::Dispatch(const DispatchParams& params) {
         LOGE("FsrContext::Dispatch failed (code {:#x})", static_cast<uint32_t>(rc));
         return false;
     }
+
+    // Flush UAV writes on output to guarantee coherency for subsequent passes
+    d3d::BarrierBatcher batcher(params.commandList);
+    batcher.Uav(params.output);
+    batcher.Flush();
+
     return true;
 }
 

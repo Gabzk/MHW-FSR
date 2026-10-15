@@ -59,6 +59,8 @@ ComPtr<ID3D12Fence> g_fence;
 HANDLE g_fenceEvent = nullptr;
 UINT64 g_fenceValue = 0;
 
+constexpr UINT kMinRtvDescriptors = 8;
+UINT g_rtvCapacity = 0;
 UINT g_rtvDescriptorSize = 0;
 UINT g_bufferCount = 0;
 HWND g_hwnd = nullptr;
@@ -221,10 +223,11 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     g_hwnd = desc.OutputWindow;
     g_bufferCount = desc.BufferCount;
 
-    // RTV Heap
+    // RTV Heap (reserve capacity for at least 8 backbuffers)
+    g_rtvCapacity = std::max(g_bufferCount, kMinRtvDescriptors);
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvDesc.NumDescriptors = g_bufferCount;
+    rtvDesc.NumDescriptors = g_rtvCapacity;
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     if (FAILED(g_device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&g_rtvHeap)))) {
         LOGE("overlay: cannot create RTV descriptor heap");
@@ -722,11 +725,36 @@ void OnPreResize() {
 
 void OnPostResize(IDXGISwapChain3* swapChain) {
     std::lock_guard lock(g_mutex);
-    if (!g_device || !g_rtvHeap) return;
+    if (!g_device) return;
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
     g_bufferCount = desc.BufferCount;
+
+    if (!g_rtvHeap || g_bufferCount > g_rtvCapacity) {
+        g_rtvCapacity = std::max(g_bufferCount, kMinRtvDescriptors);
+        D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
+        rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtvDesc.NumDescriptors = g_rtvCapacity;
+        rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        g_rtvHeap.Reset();
+        if (FAILED(g_device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&g_rtvHeap)))) {
+            LOGE("overlay: cannot recreate RTV descriptor heap on resize");
+            return;
+        }
+    }
+
+    if (g_bufferCount > g_frameContexts.size()) {
+        size_t oldSize = g_frameContexts.size();
+        g_frameContexts.resize(g_bufferCount);
+        for (size_t i = oldSize; i < g_bufferCount; ++i) {
+            if (FAILED(g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_frameContexts[i].commandAllocator)))) {
+                LOGE("overlay: cannot create command allocator on resize for index {}", i);
+            }
+            g_frameContexts[i].fenceValue = 0;
+        }
+    }
+
     CreateRenderTargetViews(swapChain);
 }
 
