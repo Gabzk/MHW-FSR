@@ -20,6 +20,8 @@ __pycache__/
 # - NVIDIA binaries
 /nvngx_dlss.dll
 *.dll
+*.obj
+images/Captura*.png
 # - NVIDIA DLSS SDK: its licence does not allow redistributing it; see third_party/dlss_sdk/README.md
 /third_party/dlss_sdk/*
 !/third_party/dlss_sdk/README.md
