@@ -4,9 +4,9 @@
 #include <string>
 #include <unordered_map>
 
-#include <nvsdk_ngx.h>
+#include "ngx_compat.h"
 
-namespace mhwdlss {
+namespace mhwfsr {
 
 // NVSDK_NGX_Parameter implementation handed to the game in place of the one from the
 // NGX 1.x driver core. The interface has not changed since NGX 1.x, so the game's calls
@@ -78,4 +78,4 @@ private:
     std::unordered_map<std::string, Value> values_;
 };
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

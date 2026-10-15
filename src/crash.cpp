@@ -7,7 +7,7 @@
 
 #include "log.h"
 
-namespace mhwdlss {
+namespace mhwfsr {
 
 namespace {
 
@@ -76,4 +76,4 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* info) {
 
 void InstallCrashLogger() { AddVectoredExceptionHandler(0, &Handler); }
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

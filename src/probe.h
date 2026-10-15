@@ -3,7 +3,7 @@
 struct ID3D12GraphicsCommandList;
 struct ID3D12Resource;
 
-namespace mhwdlss::probe {
+namespace mhwfsr::probe {
 
 // Debug readback of DLSS inputs. Schedule() records copies of the textures (all in
 // NON_PIXEL_SHADER_RESOURCE) into readback buffers; Poll() logs statistics a few frames later,
@@ -21,4 +21,4 @@ void RequestFrameDump(const wchar_t* dir, int count, unsigned delayMs);
 void RecordFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* motion, ID3D12Resource* depth,
                  float jitterX, float jitterY);
 
-}  // namespace mhwdlss::probe
+}  // namespace mhwfsr::probe

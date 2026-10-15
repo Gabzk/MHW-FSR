@@ -13,7 +13,7 @@
 #include "log.h"
 #include "memory.h"
 
-namespace mhwdlss::game {
+namespace mhwfsr::game {
 
 namespace {
 
@@ -197,6 +197,9 @@ struct CameraShot {
     std::array<float, 3> position{};
     std::array<float, 3> forward{};
     std::array<float, 2> scale{};
+    float fovY = 0.785398f;
+    float nearZ = 0.1f;
+    float farZ = 10000.0f;
     int viewport = 0;
 };
 uint64_t g_cutFrame = 0;  // renderer frame of the last camera read
@@ -227,6 +230,25 @@ std::optional<CameraShot> ReadShot(uint8_t* camera) {
             shot.forward[j] = v[j * 4 + 2];
         }
         shot.scale = {(*proj)[0], (*proj)[5]};
+        if (std::abs((*proj)[5]) > 1e-4f) {
+            shot.fovY = 2.0f * std::atan(1.0f / (*proj)[5]);
+        }
+        float A = (*proj)[10];
+        float B = (*proj)[14];
+        if (std::abs(A) < 1e-5f) {
+            shot.nearZ = B > 0.001f ? B : 0.1f;
+            shot.farZ = 10000.0f;
+        } else if (A < 0.0f) {
+            shot.nearZ = (1.0f - A) != 0.0f ? B / (1.0f - A) : 0.1f;
+            shot.farZ = -B / A;
+        } else {
+            shot.nearZ = -B / A;
+            shot.farZ = (1.0f - A) != 0.0f ? B / (1.0f - A) : 10000.0f;
+        }
+        if (shot.nearZ <= 0.0f || !std::isfinite(shot.nearZ)) shot.nearZ = 0.1f;
+        if (shot.farZ <= shot.nearZ || !std::isfinite(shot.farZ)) shot.farZ = 10000.0f;
+        if (shot.fovY <= 0.0f || !std::isfinite(shot.fovY)) shot.fovY = 0.785398f;
+
         bool finite = std::ranges::all_of(v, [](float x) { return std::isfinite(x); }) &&
                       std::isfinite(shot.scale[0]) && std::isfinite(shot.scale[1]);
         if (!finite) return std::nullopt;
@@ -317,6 +339,11 @@ void CaptureJitter(uint8_t* taa) {
 
     std::lock_guard lock(g_jitterMutex);
     rec.jitter.cut = CameraCut(camera, *frame);
+    if (g_lastShot) {
+        rec.jitter.fovY = g_lastShot->fovY;
+        rec.jitter.cameraNear = g_lastShot->nearZ;
+        rec.jitter.cameraFar = g_lastShot->farZ;
+    }
     g_jitterRecords[g_jitterNext] = rec;
     g_jitterNext = (g_jitterNext + 1) % g_jitterRecords.size();
 }
@@ -1064,4 +1091,4 @@ std::optional<Jitter> JitterForOutput(const void* outputResource) {
     return best->jitter;
 }
 
-}  // namespace mhwdlss::game
+}  // namespace mhwfsr::game

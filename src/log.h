@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace mhwdlss {
+namespace mhwfsr {
 
 enum class LogLevel : int { Debug = 0, Info = 1, Warn = 2, Error = 3 };
 
@@ -19,9 +19,9 @@ void Log(LogLevel level, std::format_string<Args...> fmt, Args&&... args) {
     LogWrite(level, std::format(fmt, std::forward<Args>(args)...));
 }
 
-#define LOGD(...) ::mhwdlss::Log(::mhwdlss::LogLevel::Debug, __VA_ARGS__)
-#define LOGI(...) ::mhwdlss::Log(::mhwdlss::LogLevel::Info, __VA_ARGS__)
-#define LOGW(...) ::mhwdlss::Log(::mhwdlss::LogLevel::Warn, __VA_ARGS__)
-#define LOGE(...) ::mhwdlss::Log(::mhwdlss::LogLevel::Error, __VA_ARGS__)
+#define LOGD(...) ::mhwfsr::Log(::mhwfsr::LogLevel::Debug, __VA_ARGS__)
+#define LOGI(...) ::mhwfsr::Log(::mhwfsr::LogLevel::Info, __VA_ARGS__)
+#define LOGW(...) ::mhwfsr::Log(::mhwfsr::LogLevel::Warn, __VA_ARGS__)
+#define LOGE(...) ::mhwfsr::Log(::mhwfsr::LogLevel::Error, __VA_ARGS__)
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

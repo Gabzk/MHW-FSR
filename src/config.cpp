@@ -6,67 +6,85 @@
 #include <cwctype>
 #include <fstream>
 
-namespace mhwdlss {
+namespace mhwfsr {
 
 Config g_config;
 
 namespace {
 
 constexpr wchar_t kDefaultIni[] =
-    L"; MHW-DLSS4 - DLSS 4 for Monster Hunter: World\n"
-    L"; Turn on \"NVIDIA DLSS\" in the game's graphics options; this plugin replaces what it runs.\n"
-    L"; The file is re-read while the game runs.\n"
+    L"; =============================================================================\n"
+    L"; MHW-FSR - AMD FidelityFX FSR 3.1 & FSR 4.1 para Monster Hunter: World (DX12)\n"
+    L"; =============================================================================\n"
+    L"; Como usar:\n"
+    L"; 1. Ative a API DirectX 12 nas opcoes graficas do jogo.\n"
+    L"; 2. Ative a opcao \"NVIDIA DLSS\" (o mod intercepta essa chamada e roda o FSR nativo).\n"
+    L"; 3. Este arquivo e recarregado automaticamente em tempo real enquanto o jogo roda.\n"
     L"\n"
     L"[General]\n"
-    L"; 0 disables the plugin entirely (needs a game restart).\n"
+    L"; Enabled: 1 = Mod ativado, 0 = Desativa completamente o plugin (requer reiniciar o jogo).\n"
     L"Enabled=1\n"
-    L"; Debug, Info, Warn or Error.\n"
+    L"\n"
+    L"; LogLevel: Nivel de detalhe gravado em nativePC\\plugins\\MHW-FSR.log\n"
+    L"; Opcoes: Debug, Info, Warn, Error.\n"
+    L"; (Use 'Debug' para ver resolucoes exatas de cada frame e diagnostico completo).\n"
     L"LogLevel=Info\n"
     L"\n"
-    L"[DLSS]\n"
-    L"; DLAA, Quality, Balanced, Performance or Custom.\n"
-    L"; DLAA renders at native resolution and replaces the game's anti-aliasing.\n"
-    L"; The other modes render at a lower resolution and let DLSS scale the frame up where the\n"
-    L"; game's own upscaler (DLISP) used to sit, after post-processing. The game never renders\n"
-    L"; below half resolution, so there is no Ultra Performance mode.\n"
-    L"Mode=DLAA\n"
-    L"; Render scale used when Mode=Custom, 0.5 to 1.0.\n"
-    L"RenderScale=1.0\n"
-    L"; DLSS render preset: Default, J, K, L or M.\n"
-    L"Preset=K\n"
-    L"; Sharpening after DLSS, 0 (off) to 1. Game = the in-game \"DLSS Sharpness\" slider, same\n"
-    L"; scale. Current DLSS versions do not sharpen, so the plugin runs a sharpening filter on the\n"
-    L"; DLSS output.\n"
-    L"Sharpness=0.33\n"
-    L"; The filter:\n"
-    L";   NVSharpen  NVIDIA Image Scaling (1 here is NVIDIA's 0.3; above that it gets harsh).\n"
-    L";   Vanilla    the filter of the game's original DLSS sharpening. 1 is the strongest the\n"
-    L";              original allowed, about NVSharpen's 0.8.\n"
-    L";   RCAS       AMD FidelityFX RCAS, the filter of versions 0.2 and 0.3. About as strong as\n"
-    L";              NVSharpen up to 0.5, stronger above.\n"
-    L"Sharpener=NVSharpen\n"
-    L"; Which nvngx_dlss.dll to use. Empty: the newest DLSS the NVIDIA driver has downloaded, or\n"
-    L"; nvngx_dlss.dll in the MHW-DLSS4 folder next to this file when that one is newer.\n"
-    L"; Otherwise a folder holding nvngx_dlss.dll, or the DLL file itself under any name. Relative\n"
-    L"; paths start at the game folder (the one with MonsterHunterWorld.exe). Examples:\n"
-    L";   DLLPath=nativePC\\plugins\\MHW-DLSS4\n"
-    L";   DLLPath=nativePC\\plugins\\MHW-DLSS4\\nvngx_dlss_310.4.dll\n"
-    L";   DLLPath=..\\Cyberpunk 2077\\bin\\x64\n"
-    L";   DLLPath=D:\\DLSS\\310.9\\nvngx_dlss.dll\n"
-    L"; Read when the game starts.\n"
-    L"DLLPath=\n"
-    L"; Let DLSS estimate exposure itself (presets L and M always do).\n"
-    L"AutoExposure=0\n"
-    L"; DLAA mode only: show the game's TAA instead of DLSS, for comparisons.\n"
-    L"Bypass=0\n"
+    L"[FSR]\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; QualityPreset: Define a resolucao de renderizacao interna e modo de operacao.\n"
+    L"; Opcoes:\n"
+    L";   NativeAA         -> Renderiza em 100% da resolucao nativa da tela (sem upscale).\n"
+    L";                       Substitui o TAA borrado do jogo pelo anti-aliasing temporal\n"
+    L";                       ultra-nitido do FSR. Maxima qualidade de imagem possivel.\n"
+    L";   Quality          -> Modo Qualidade (~1.5x de escala: ex. 1706x960 upscaled para 1440p).\n"
+    L";                       Excelente ganho de FPS mantendo a imagem praticamente nativa.\n"
+    L";   Balanced         -> Modo Equilibrado (~1.7x de escala: ex. 1506x847 upscaled para 1440p).\n"
+    L";   Performance      -> Modo Desempenho (2.0x de escala: ex. 1280x720 upscaled para 1440p).\n"
+    L";                       Maximo FPS possivel.\n"
+    L";   UltraPerformance -> Roda a 0.5 de escala (a engine do MHW nao permite menos que 0.5).\n"
+    L";   Custom           -> Permite definir uma escala personalizada no parametro RenderScale abaixo.\n"
+    L"QualityPreset=Quality\n"
     L"\n"
-    L"[Reflex]\n"
-    L"; NVIDIA Reflex Low Latency: Off, On or Boost. On lets the driver start each frame just in\n"
-    L"; time for the graphics card, and makes a frame rate cap set in the NVIDIA Control Panel or\n"
-    L"; NVIDIA App wait at the start of the frame, where it adds the least input lag. Boost also\n"
-    L"; keeps the graphics card at full clock speed: a little less input lag, more power.\n"
-    L"; Works with NVIDIA DLSS on or off.\n"
-    L"LowLatency=On\n";
+    L"; RenderScale: Usado apenas quando QualityPreset=Custom (valores de 0.50 a 1.00).\n"
+    L"RenderScale=1.0\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; Version: Versao do algoritmo de upscaling da AMD FidelityFX API.\n"
+    L"; Opcoes:\n"
+    L";   Auto      -> Recomendado. Detecta a sua GPU automaticamente:\n"
+    L";                - Em GPUs RDNA 3 (como a RX 7700 XT) e RDNA 4: roda FSR 4 (IA/ML).\n"
+    L";                - Em GPUs anteriores (RDNA 1, RDNA 2, etc.): roda FSR 3.1.5 (Temporal).\n"
+    L";   FSR 4     -> Forca o upscaler FSR 4 com Machine Learning (tambem aceita: 4.1, FSR4).\n"
+    L";   FSR 3.1   -> Forca o upscaler temporal FSR 3.1 (tambem aceita: 3.1.5, FSR3).\n"
+    L";   0x...     -> ID hexadecimal exato de um provedor listado no MHW-FSR.log.\n"
+    L"Version=Auto\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; Sharpness: Filtro de nitidez adaptativo integrado (AMD FidelityFX RCAS).\n"
+    L";   0.00      -> Nitidez desligada.\n"
+    L";   0.33      -> Toque suave de nitidez (recomendado para 1440p / 4K).\n"
+    L";   0.66      -> Nitidez moderada.\n"
+    L";   1.00      -> Nitidez maxima.\n"
+    L";   Game      -> Segue o valor da barra \"Nitidez do DLSS\" do menu grafico do jogo.\n"
+    L"Sharpness=0.33\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; AutoExposure: Estimativa de exposicao automatica pelo FSR.\n"
+    L";   0 = Desligado (usa os buffers de exposicao e iluminacao nativos da engine MT Framework).\n"
+    L";   1 = Ligado (permite que o FSR calcule sua propria exposicao dinamica).\n"
+    L"AutoExposure=0\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; DLLPath: Pasta contendo amd_fidelityfx_loader_dx12.dll e amd_fidelityfx_upscaler_dx12.dll.\n"
+    L"; Deixe em branco para usar o padrao seguro: nativePC\\plugins\\MHW-FSR\\\n"
+    L"DLLPath=\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; Bypass: Modo de comparacao (util apenas quando QualityPreset=NativeAA).\n"
+    L";   0 = FSR ativo.\n"
+    L";   1 = Mostra o TAA antigo da Capcom para comparar a diferenca de nitidez lado a lado.\n"
+    L"Bypass=0\n";
 
 std::wstring g_iniPath;
 unsigned long long g_iniTime = 0;
@@ -83,11 +101,9 @@ unsigned long long LastWrite(const std::wstring& path) {
            data.ftLastWriteTime.dwLowDateTime;
 }
 
-constexpr const wchar_t* kSections[] = {L"General", L"DLSS", L"Reflex", L"Advanced"};
+constexpr const wchar_t* kSections[] = {L"General", L"FSR", L"DLSS", L"Advanced"};
 
 std::wstring ReadString(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
-    // The key's own section first. A key added under another section of the file (easy to do when
-    // appending to the end) still counts.
     constexpr wchar_t kMissing[] = L"\x01";
     wchar_t buf[1024];
     GetPrivateProfileStringW(section, key, kMissing, buf, static_cast<DWORD>(std::size(buf)), ini.c_str());
@@ -97,8 +113,6 @@ std::wstring ReadString(const std::wstring& ini, const wchar_t* section, const w
             GetPrivateProfileStringW(other, key, kMissing, buf, static_cast<DWORD>(std::size(buf)), ini.c_str());
     }
     std::wstring s = wcscmp(buf, kMissing) == 0 ? def : buf;
-    // Strip a trailing comment: ; or # at the start or after a space, so that paths like
-    // D:\Games#2 survive.
     for (size_t i = 0; i < s.size(); ++i) {
         if ((s[i] == L';' || s[i] == L'#') && (i == 0 || std::iswspace(s[i - 1]))) {
             s.resize(i);
@@ -109,7 +123,6 @@ std::wstring ReadString(const std::wstring& ini, const wchar_t* section, const w
     size_t start = 0;
     while (start < s.size() && std::iswspace(s[start])) ++start;
     s = s.substr(start);
-    // Windows drops quotes around a whole value itself, but not when a comment follows.
     if (s.size() >= 2 && (s.front() == L'"' || s.front() == L'\'') && s.back() == s.front())
         s = s.substr(1, s.size() - 2);
     return s;
@@ -137,15 +150,23 @@ float ReadFloat(const std::wstring& ini, const wchar_t* section, const wchar_t* 
     }
 }
 
+std::string Narrow(const std::wstring& ws) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
+    return s;
+}
+
 }  // namespace
 
 float Config::RenderScale() const {
     switch (mode) {
-        case QualityMode::DLAA: return 1.0f;
+        case QualityMode::NativeAA: return 1.0f;
         case QualityMode::Quality: return 2.0f / 3.0f;
-        case QualityMode::Balanced: return 0.58f;
+        case QualityMode::Balanced: return 1.0f / 1.7f;
         case QualityMode::Performance: return 0.5f;
-        // The game does not render below half resolution.
+        case QualityMode::UltraPerformance: return 0.5f;
         case QualityMode::Custom: return std::clamp(customScale, 0.5f, 1.0f);
     }
     return 1.0f;
@@ -155,29 +176,12 @@ float Config::Sharpness() const { return std::clamp(sharpness < 0.0f ? g_gameSha
 
 const char* QualityModeName(QualityMode mode) {
     switch (mode) {
-        case QualityMode::DLAA: return "DLAA";
+        case QualityMode::NativeAA: return "NativeAA";
         case QualityMode::Quality: return "Quality";
         case QualityMode::Balanced: return "Balanced";
         case QualityMode::Performance: return "Performance";
+        case QualityMode::UltraPerformance: return "UltraPerformance";
         case QualityMode::Custom: return "Custom";
-    }
-    return "?";
-}
-
-const char* SharpenerName(Sharpener sharpener) {
-    switch (sharpener) {
-        case Sharpener::NVSharpen: return "NVSharpen";
-        case Sharpener::Vanilla: return "Vanilla";
-        case Sharpener::Rcas: return "RCAS";
-    }
-    return "?";
-}
-
-const char* ReflexModeName(ReflexMode mode) {
-    switch (mode) {
-        case ReflexMode::Off: return "Off";
-        case ReflexMode::On: return "On";
-        case ReflexMode::Boost: return "Boost";
     }
     return "?";
 }
@@ -185,7 +189,7 @@ const char* ReflexModeName(ReflexMode mode) {
 void LoadConfig(const std::wstring& ini) {
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::ofstream out(ini, std::ios::binary);
-        for (const wchar_t* p = kDefaultIni; *p; ++p) out.put(static_cast<char>(*p));  // plain ASCII
+        for (const wchar_t* p = kDefaultIni; *p; ++p) out.put(static_cast<char>(*p));
     }
 
     Config c;
@@ -197,47 +201,34 @@ void LoadConfig(const std::wstring& ini) {
     else if (level == L"error") c.logLevel = LogLevel::Error;
     else c.logLevel = LogLevel::Info;
 
-    auto mode = Lower(ReadString(ini, L"DLSS", L"Mode", L"dlaa"));
+    auto mode = Lower(ReadString(ini, L"FSR", L"QualityPreset", L""));
+    if (mode.empty()) {
+        mode = Lower(ReadString(ini, L"FSR", L"Mode", L"nativeaa"));
+    }
     if (mode == L"quality") c.mode = QualityMode::Quality;
     else if (mode == L"balanced") c.mode = QualityMode::Balanced;
-    // UltraPerformance was accepted by 0.1; the game cannot go below Performance's scale.
-    else if (mode == L"performance" || mode == L"ultraperformance") c.mode = QualityMode::Performance;
+    else if (mode == L"performance") c.mode = QualityMode::Performance;
+    else if (mode == L"ultraperformance") c.mode = QualityMode::UltraPerformance;
     else if (mode == L"custom") c.mode = QualityMode::Custom;
-    else c.mode = QualityMode::DLAA;
-    c.customScale = ReadFloat(ini, L"DLSS", L"RenderScale", c.customScale);
+    else c.mode = QualityMode::NativeAA;
 
-    auto sharpness = Lower(ReadString(ini, L"DLSS", L"Sharpness", L""));
+    c.customScale = ReadFloat(ini, L"FSR", L"RenderScale", c.customScale);
+
+    auto sharpness = Lower(ReadString(ini, L"FSR", L"Sharpness", L""));
     if (sharpness == L"game")
         c.sharpness = -1.0f;
     else if (!sharpness.empty())
-        c.sharpness = std::clamp(ReadFloat(ini, L"DLSS", L"Sharpness", c.sharpness), 0.0f, 1.0f);
-    auto sharpener = Lower(ReadString(ini, L"DLSS", L"Sharpener", L""));
-    // DLSS was 0.6's name for Vanilla.
-    if (sharpener == L"vanilla" || sharpener == L"dlss") c.sharpener = Sharpener::Vanilla;
-    else if (sharpener == L"rcas") c.sharpener = Sharpener::Rcas;
+        c.sharpness = std::clamp(ReadFloat(ini, L"FSR", L"Sharpness", c.sharpness), 0.0f, 1.0f);
 
-    auto preset = Lower(ReadString(ini, L"DLSS", L"Preset", L"k"));
-    if (preset.size() == 1 && preset[0] >= L'a' && preset[0] <= L'o')
-        c.preset = static_cast<unsigned int>(preset[0] - L'a') + 1;  // A=1 ... K=11, M=13
-    else
-        c.preset = 0;
+    c.autoExposure = ReadBool(ini, L"FSR", L"AutoExposure", c.autoExposure);
+    c.version = Narrow(ReadString(ini, L"FSR", L"Version", L"Auto"));
+    c.dllPath = ReadString(ini, L"FSR", L"DLLPath", L"");
+    c.bypass = ReadBool(ini, L"FSR", L"Bypass", c.bypass);
 
-    c.dllPath = ReadString(ini, L"DLSS", L"DLLPath", L"");
-    c.autoExposure = ReadBool(ini, L"DLSS", L"AutoExposure", c.autoExposure);
-    c.bypass = ReadBool(ini, L"DLSS", L"Bypass", c.bypass);
-
-    auto lowLatency = Lower(ReadString(ini, L"Reflex", L"LowLatency", L"on"));
-    if (lowLatency == L"off" || lowLatency == L"0") c.reflex = ReflexMode::Off;
-    else if (lowLatency == L"boost") c.reflex = ReflexMode::Boost;
-    else c.reflex = ReflexMode::On;
-
-    // [Advanced]: developer keys, not in the default ini (docs/technical.md lists them). Inis of 0.8.1
-    // and older still have the measured conventions there, with the default values.
-
+    // [Advanced]
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
+    c.depthInfinite = ReadBool(ini, L"Advanced", L"DepthInfinite", c.depthInfinite);
     c.mvJittered = ReadBool(ini, L"Advanced", L"MVJittered", c.mvJittered);
-    // MVScaleX/Y of 0.1 and 0.2 held the wrong 1, 1 in every ini written by those versions; they are
-    // ignored, the measured scale lives under new names.
     c.mvScaleX = ReadFloat(ini, L"Advanced", L"MotionScaleX", c.mvScaleX);
     c.mvScaleY = ReadFloat(ini, L"Advanced", L"MotionScaleY", c.mvScaleY);
     c.jitterScaleX = ReadFloat(ini, L"Advanced", L"JitterScaleX", c.jitterScaleX);
@@ -254,20 +245,13 @@ void LoadConfig(const std::wstring& ini) {
     c.exposureScale = ReadFloat(ini, L"Advanced", L"ExposureScale", c.exposureScale);
     c.preExposure = ReadFloat(ini, L"Advanced", L"PreExposure", c.preExposure);
 
-    c.ngxLogging = ReadBool(ini, L"Advanced", L"NGXLogging", c.ngxLogging);
     c.verboseFrames = ReadBool(ini, L"Advanced", L"VerboseFrames", c.verboseFrames);
     c.debugProbe = ReadBool(ini, L"Advanced", L"DebugProbe", c.debugProbe);
     c.debugDumpFrames = static_cast<int>(ReadFloat(ini, L"Advanced", L"DebugDumpFrames", 0.0f));
     c.debugDumpDelay = std::clamp(ReadFloat(ini, L"Advanced", L"DebugDumpDelay", c.debugDumpDelay), 0.0f, 60.0f);
-    c.debugDumpOutput = ReadBool(ini, L"Advanced", L"DebugDumpOutput", c.debugDumpOutput);
     c.debugFixedJitter = ReadBool(ini, L"Advanced", L"DebugFixedJitter", c.debugFixedJitter);
     c.debugJitterX = ReadFloat(ini, L"Advanced", L"DebugJitterX", c.debugJitterX);
     c.debugJitterY = ReadFloat(ini, L"Advanced", L"DebugJitterY", c.debugJitterY);
-    c.latencyStats = ReadBool(ini, L"Advanced", L"LatencyStats", c.latencyStats);
-    // Reflex frame rate cap: measured to add the same input lag as the game's own cap and the
-    // driver's (with LowLatency on), so it is only kept for measurements.
-    c.frameLimit = std::clamp(ReadFloat(ini, L"Advanced", L"FrameLimit", c.frameLimit), 0.0f, 1000.0f);
-    c.reflexSleep = ReadBool(ini, L"Advanced", L"ReflexSleep", c.reflexSleep);
 
     g_config = c;
     g_iniPath = ini;
@@ -285,7 +269,6 @@ void LoadGameOptions(const std::wstring& path) {
     g_gameOptionsPath = path;
     g_gameOptionsTime = LastWrite(path);
     g_gameSharpness = std::clamp(ReadFloat(path, L"GraphicsOption", L"DLSS_Sharpness", 0.0f), 0.0f, 1.0f);
-    // 30, 60, 90, 120, 144, 165, 240 or No Limit.
     g_gameFrameRate = std::max(0, static_cast<int>(ReadFloat(path, L"GraphicsOption", L"FrameRate", 0.0f)));
 }
 
@@ -300,4 +283,4 @@ float GameSharpness() { return g_gameSharpness; }
 
 int GameFrameRate() { return g_gameFrameRate; }
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

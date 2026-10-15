@@ -2,7 +2,7 @@
 
 #include <charconv>
 
-namespace mhwdlss::mem {
+namespace mhwfsr::mem {
 
 std::optional<Section> FindSection(HMODULE module, std::string_view name) {
     auto* base = reinterpret_cast<uint8_t*>(module);
@@ -86,4 +86,4 @@ bool SafeRead(const void* src, void* dst, size_t size) {
     }
 }
 
-}  // namespace mhwdlss::mem
+}  // namespace mhwfsr::mem

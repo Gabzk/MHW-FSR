@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <mutex>
 
-namespace mhwdlss {
+namespace mhwfsr {
 
 namespace {
 std::mutex g_mutex;
@@ -51,4 +51,4 @@ void LogWrite(LogLevel level, std::string_view text) {
     std::fflush(g_file);
 }
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

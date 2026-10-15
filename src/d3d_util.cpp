@@ -11,7 +11,7 @@
 
 #include "log.h"
 
-namespace mhwdlss::d3d {
+namespace mhwfsr::d3d {
 
 namespace {
 
@@ -252,4 +252,4 @@ bool DumpTexture11(ID3D11DeviceContext* ctx, ID3D11Resource* texture, const std:
     return true;
 }
 
-}  // namespace mhwdlss::d3d
+}  // namespace mhwfsr::d3d

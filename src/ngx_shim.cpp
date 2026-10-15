@@ -1,13 +1,9 @@
 #include "ngx_shim.h"
 
-#include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <psapi.h>
 #include <wrl/client.h>
-
-#include <nvsdk_ngx.h>
-#include <nvsdk_ngx_helpers.h>
 
 #include <algorithm>
 #include <atomic>
@@ -20,35 +16,28 @@
 
 #include "config.h"
 #include "d3d_util.h"
-#include "dlss_dll.h"
+#include "fsr_context.h"
+#include "fsr_loader.h"
 #include "game.h"
 #include "log.h"
 #include "memory.h"
+#include "ngx_compat.h"
 #include "ngx_params.h"
 #include "probe.h"
-#include "reflex.h"
-#include "sharpen.h"
 
-namespace mhwdlss::ngx {
+namespace mhwfsr::ngx {
 
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-// NGX is initialised with a project id. With the game's application id the driver serves its
-// per-game DLSS 1 model over the air instead of the nvngx_dlss.dll we ship.
-constexpr char kProjectId[] = "3f1e9a52-6c0b-4d7e-a8f4-5b2c1d9e7a60";
 constexpr unsigned kFirstHandleId = 0x4d480001;
 constexpr uint64_t kDetailedEvaluations = 3;
-// Frames of another render size than the feature was created for that are skipped as leftovers
-// of a resolution change; past this the size is taken as the new one.
 constexpr unsigned kMaxStaleFrames = 8;
 
 enum class Api { D3D11, D3D12 };
 const char* ApiName(Api api) { return api == Api::D3D12 ? "D3D12" : "D3D11"; }
 
-// Function table inside the game's static NGX 1.3 library. The exported NVSDK_NGX_* functions
-// call through it; NVSDK_NGX_*_Init fills it from the driver's NGX 1.x core.
 struct Table {
     void* init;
     void* shutdown;
@@ -68,59 +57,36 @@ struct ApiState {
     Table shim{};
 };
 
-// NGX 1.x handles are { unsigned int Id }; the SDK keeps the type opaque.
 struct ShimHandle {
     unsigned int id = 0;
 };
 
-// One DLSS feature of the current NGX and the settings it was created with.
-struct DlssInstance {
-    NVSDK_NGX_Handle* handle = nullptr;
-    unsigned inWidth = 0, inHeight = 0, outWidth = 0, outHeight = 0;
-    int flags = 0;
-    unsigned preset = 0;
-    bool subrects = false;
-    bool failed = false;
-};
-
-// A feature the game created through the NGX 1.x API. SuperSampling is evaluated at the TAA
-// position; ImageSignalProcessing (DLISP) where the game scales the frame to the output size.
 struct Feature {
-    ShimHandle handle;  // its address is what the game holds
+    ShimHandle handle;
     NVSDK_NGX_Feature id = NVSDK_NGX_Feature_Reserved_Unknown;
     Api api = Api::D3D12;
-    NVSDK_NGX_Handle* legacy = nullptr;  // created by the NGX 1.x core before we were loaded
-    DlssInstance dlss;
-    // Render size the game created the feature for (0 = unknown). Frames still in flight from
-    // before a resolution change are skipped instead of building a short-lived DLSS feature.
+    NVSDK_NGX_Handle* legacy = nullptr;
+
+    FsrContext fsr;
+
     unsigned expectedWidth = 0, expectedHeight = 0;
     unsigned staleFrames = 0;
     bool resetNext = false;
     uint64_t evaluations = 0;
-    uint64_t resets = 0;  // since the last progress line in the log
+    uint64_t resets = 0;
 
     NVSDK_NGX_Handle* Handle() { return reinterpret_cast<NVSDK_NGX_Handle*>(&handle); }
-    const char* Name() const { return id == NVSDK_NGX_Feature_SuperSampling ? "DLSS" : "DLISP"; }
+    const char* Name() const { return id == NVSDK_NGX_Feature_SuperSampling ? "FSR(TAA)" : "FSR(DLISP)"; }
 };
 
-struct Modern {
-    bool attempted = false;
-    bool ready = false;
-    Api api = Api::D3D12;
-    void* device = nullptr;
-    NVSDK_NGX_Parameter* params = nullptr;
-};
-
-// In the upscaling modes DLSS runs where the game calls DLISP, after post-processing. The TAA
-// position call passes the jittered frame through and leaves the rest of the inputs here.
 struct UpscaleInputs {
     bool valid = false;
     d3d::Mirror12 motion12, depth12;
-    d3d::Mirror11 motion11, depth11;
-    void* motion = nullptr;
-    void* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    ID3D12Resource* depth = nullptr;
     unsigned x = 0, y = 0, width = 0, height = 0;
     float jitterX = 0, jitterY = 0;
+    float cameraNear = 0.1f, cameraFar = 10000.0f, cameraFov = 0.785398f;
     int reset = 0;
     uint64_t frame = 0;
 };
@@ -135,62 +101,48 @@ NVSDK_NGX_Parameter* g_legacyParams = nullptr;
 bool g_contextCreated = false;
 bool g_fallbackChecked = false;
 
-Modern g_modern;
 UpscaleInputs g_upscale;
 std::wstring g_dataDir;
 std::wstring g_gameDir;
-// The one folder NGX searches for nvngx_dlss.dll, picked at the first init.
-std::wstring g_dlssFolder;
-const wchar_t* g_dlssFolderPtr = nullptr;
-bool g_loggedModules = false;
 bool g_probeRequested = false;
-bool g_dumpOutputRequested = false;
-// The context was adopted after the game had set DLSS up through its NGX 1.x core (see OnUpdate).
 bool g_adoptedLate = false;
 
-ApiState& State(Api api) { return g_api[api == Api::D3D12 ? 1 : 0]; }
+LARGE_INTEGER g_qpcFreq{};
+LARGE_INTEGER g_lastDispatchQpc{};
 
-// ---------------------------------------------------------------------------------------------
-// Parameter helpers that work on any NVSDK_NGX_Parameter.
+ApiState& State(Api api) { return g_api[api == Api::D3D12 ? 1 : 0]; }
 
 unsigned GetUI(const NVSDK_NGX_Parameter* p, const char* name, unsigned def = 0) {
     unsigned v = def;
     return NVSDK_NGX_SUCCEED(p->Get(name, &v)) ? v : def;
 }
+
 int GetI(const NVSDK_NGX_Parameter* p, const char* name, int def = 0) {
     int v = def;
     return NVSDK_NGX_SUCCEED(p->Get(name, &v)) ? v : def;
 }
-void* GetResource(Api api, const NVSDK_NGX_Parameter* p, const char* name) {
-    if (api == Api::D3D12) {
-        ID3D12Resource* r = nullptr;
-        return NVSDK_NGX_SUCCEED(p->Get(name, &r)) ? r : nullptr;
-    }
-    ID3D11Resource* r = nullptr;
+
+ID3D12Resource* GetResource12(const NVSDK_NGX_Parameter* p, const char* name) {
+    ID3D12Resource* r = nullptr;
     return NVSDK_NGX_SUCCEED(p->Get(name, &r)) ? r : nullptr;
 }
 
-d3d::TextureInfo Info(Api api, void* resource) {
-    return api == Api::D3D12 ? d3d::Info(static_cast<ID3D12Resource*>(resource))
-                             : d3d::Info(static_cast<ID3D11Resource*>(resource));
+d3d::TextureInfo Info(ID3D12Resource* resource) {
+    return d3d::Info(resource);
 }
 
-void* DeviceOf(Api api, void* cmd) {
+ID3D12Device* DeviceOf(void* cmd) {
     if (!cmd) return nullptr;
-    if (api == Api::D3D12) {
-        ComPtr<ID3D12Device> device;
-        if (FAILED(static_cast<ID3D12GraphicsCommandList*>(cmd)->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
-        return device.Get();  // the game keeps the device alive
-    }
-    ComPtr<ID3D11Device> device;
-    static_cast<ID3D11DeviceContext*>(cmd)->GetDevice(&device);
+    ComPtr<ID3D12Device> device;
+    if (FAILED(static_cast<ID3D12GraphicsCommandList*>(cmd)->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
     return device.Get();
 }
 
 Feature* FindFeature(const NVSDK_NGX_Handle* handle) {
     if (!handle) return nullptr;
-    for (auto& f : g_features)
+    for (auto& f : g_features) {
         if (f->Handle() == handle || (f->legacy && f->legacy == handle)) return f.get();
+    }
     return nullptr;
 }
 
@@ -204,10 +156,10 @@ Feature* AddFeature(Api api, NVSDK_NGX_Feature id, NVSDK_NGX_Handle* legacy) {
     return g_features.back().get();
 }
 
-// The rectangle the game renders into, from the Rect.* parameters (whole texture if unset).
 struct Rect {
     unsigned x = 0, y = 0, width = 0, height = 0;
 };
+
 Rect RectFrom(const NVSDK_NGX_Parameter* p, const d3d::TextureInfo& texture) {
     Rect r{GetUI(p, "Rect.X"), GetUI(p, "Rect.Y"), GetUI(p, "Rect.W"), GetUI(p, "Rect.H")};
     if (!r.width || !r.height) {
@@ -224,27 +176,22 @@ bool StaleFrame(Feature& f, unsigned width, unsigned height) {
         return false;
     }
     if (++f.staleFrames > kMaxStaleFrames) {
-        // Not a leftover: the game renders at another size than it asked for (it clamps the
-        // render scale, for one). Skipping would leave the frame unscaled for good.
-        LOGW("{}: the game renders {}x{} instead of the {}x{} it created the feature for; using {}x{}", f.Name(), width,
-             height, f.expectedWidth, f.expectedHeight, width, height);
+        LOGW("{}: the game renders {}x{} instead of expected {}x{}; updating expected size",
+             f.Name(), width, height, f.expectedWidth, f.expectedHeight);
         f.expectedWidth = width;
         f.expectedHeight = height;
         f.staleFrames = 0;
         return false;
     }
-    if (f.staleFrames == 1)
-        LOGD("{}: skipping {}x{} frames from before the switch to {}x{}", f.Name(), width, height, f.expectedWidth,
-             f.expectedHeight);
+    if (f.staleFrames == 1) {
+        LOGD("{}: skipping {}x{} frame from before switch to {}x{}", f.Name(), width, height, f.expectedWidth, f.expectedHeight);
+    }
     return true;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Render scale handed to the game through DLSSOptimalSettingsCallback.
-
 NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* p) {
     if (!p) return NVSDK_NGX_Result_FAIL_InvalidParameter;
-    std::lock_guard lock(g_mutex);  // g_config is replaced under it on ini reloads
+    std::lock_guard lock(g_mutex);
     unsigned w = GetUI(p, NVSDK_NGX_Parameter_Width);
     unsigned h = GetUI(p, NVSDK_NGX_Parameter_Height);
     float scale = g_config.RenderScale();
@@ -260,549 +207,288 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* p) {
     p->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, rw);
     p->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, rh);
     p->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
-    // NGX 1.x: 1 = DLSS. Below a scale of 1 the game also creates DLISP to reach the output size.
     p->Set("DLSSMode", 1);
+
     static unsigned lastW = 0, lastH = 0, lastRw = 0;
     if (w != lastW || h != lastH || rw != lastRw) {
         lastW = w;
         lastH = h;
         lastRw = rw;
-        LOGI("optimal settings: output {}x{} -> render {}x{} ({})", w, h, rw, rh, QualityModeName(g_config.mode));
+        LOGI("FSR optimal settings: output {}x{} -> render {}x{} (scale {:.3f}, {})",
+             w, h, rw, rh, scale, QualityModeName(g_config.mode));
     }
     return NVSDK_NGX_Result_Success;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Current NGX (the SDK linked into this plugin).
-
-void NVSDK_CONV NgxLogCallback(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
-    std::string_view msg(message ? message : "");
-    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.remove_suffix(1);
-    LOGI("[NGX] {}", msg);
+float GetFrameDeltaTimeMs() {
+    if (!g_qpcFreq.QuadPart) {
+        QueryPerformanceFrequency(&g_qpcFreq);
+        QueryPerformanceCounter(&g_lastDispatchQpc);
+        return 16.666f;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = static_cast<double>(now.QuadPart - g_lastDispatchQpc.QuadPart) * 1000.0 / g_qpcFreq.QuadPart;
+    g_lastDispatchQpc = now;
+    return static_cast<float>(std::clamp(elapsed, 0.1, 100.0));
 }
 
-// The game initialised the driver's NGX 1.x core with its application id before we were loaded.
-// That context is process wide: left alive, our init joins it and NGX serves the game's
-// per-application OTA model (DLSS 1.2) instead of nvngx_dlss.dll. It is torn down first.
-void ShutdownLegacy() {
-    for (Api api : {Api::D3D11, Api::D3D12}) {
-        ApiState& s = State(api);
-        auto shutdown = reinterpret_cast<PfnShutdown>(s.legacy.shutdown);
-        if (!shutdown) continue;
-        auto release = reinterpret_cast<PfnRelease>(s.legacy.release);
-        for (auto& f : g_features) {
-            if (f->api != api || !f->legacy) continue;
-            if (release) release(f->legacy);
-            f->legacy = nullptr;
-        }
-        NVSDK_NGX_Result r = shutdown();
-        LOGD("legacy NGX {} context shut down ({:#x})", ApiName(api), static_cast<unsigned>(r));
-        s.legacy = {};
-    }
-    g_legacyParams = nullptr;
-}
-
-bool InitModern(Api api, void* device);
-
-bool EnsureModern(Api api, void* device) {
-    if (g_modern.attempted) {
-        if (g_modern.ready && (g_modern.api != api || g_modern.device != device)) {
-            LOGE("NGX is initialised for {} device {}, but the game now uses {} device {}", ApiName(g_modern.api),
-                 g_modern.device, ApiName(api), device);
-            return false;
-        }
-        return g_modern.ready;
-    }
-    bool ready = InitModern(api, device);
-    game::SetDlssUnavailable(!ready);
-    return ready;
-}
-
-bool InitModern(Api api, void* device) {
-    g_modern = {};
-    g_modern.attempted = true;
-    g_modern.api = api;
-    g_modern.device = device;
-    if (!device) {
-        LOGE("NGX init: no device");
-        return false;
-    }
-
-    ShutdownLegacy();
-
-    if (!g_dlssFolderPtr) {
-        g_dlssFolder = SelectDlssFolder(g_dataDir, g_gameDir);
-        g_dlssFolderPtr = g_dlssFolder.c_str();
-    }
-    NVSDK_NGX_FeatureCommonInfo info{};
-    info.PathListInfo.Path = &g_dlssFolderPtr;
-    info.PathListInfo.Length = 1;
-    info.LoggingInfo.LoggingCallback = &NgxLogCallback;
-    info.LoggingInfo.MinimumLoggingLevel =
-        g_config.ngxLogging ? NVSDK_NGX_LOGGING_LEVEL_VERBOSE : NVSDK_NGX_LOGGING_LEVEL_OFF;
-    info.LoggingInfo.DisableOtherLoggingSinks = true;
-
-    NVSDK_NGX_Result r =
-        api == Api::D3D12
-            ? NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHW_DLSS4_VERSION,
-                                                  g_dataDir.c_str(), static_cast<ID3D12Device*>(device), &info)
-            : NVSDK_NGX_D3D11_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, MHW_DLSS4_VERSION,
-                                                  g_dataDir.c_str(), static_cast<ID3D11Device*>(device), &info);
-    if (NVSDK_NGX_FAILED(r)) {
-        LOGE("NGX {} init failed ({:#x})", ApiName(api), static_cast<unsigned>(r));
-        return false;
-    }
-
-    r = api == Api::D3D12 ? NVSDK_NGX_D3D12_GetCapabilityParameters(&g_modern.params)
-                          : NVSDK_NGX_D3D11_GetCapabilityParameters(&g_modern.params);
-    if (NVSDK_NGX_FAILED(r) || !g_modern.params) {
-        LOGE("NGX GetCapabilityParameters failed ({:#x})", static_cast<unsigned>(r));
-        return false;
-    }
-
-    int available = 0, needsDriver = 0, initResult = 0;
-    unsigned minMajor = 0, minMinor = 0;
-    g_modern.params->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available);
-    g_modern.params->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needsDriver);
-    g_modern.params->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &minMajor);
-    g_modern.params->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &minMinor);
-    g_modern.params->Get(NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &initResult);
-    if (!available) {
-        LOGE("DLSS is not available (init result {:#x}, needs driver update {}, minimum driver {}.{}). "
-             "See the nvngx_dlss.dll line above.",
-             static_cast<unsigned>(initResult), needsDriver, minMajor, minMinor);
-        return false;
-    }
-    g_modern.ready = true;
-    LOGI("NGX {} ready", ApiName(api));
-    return true;
-}
-
-void ShutdownModern() {
-    if (!g_modern.attempted) return;
-    if (g_modern.ready) {
-        if (g_modern.api == Api::D3D12)
-            NVSDK_NGX_D3D12_Shutdown1(static_cast<ID3D12Device*>(g_modern.device));
-        else
-            NVSDK_NGX_D3D11_Shutdown1(static_cast<ID3D11Device*>(g_modern.device));
-    }
-    g_modern = {};
-}
-
-void LogDlssModules() {
-    if (g_loggedModules) return;
-    g_loggedModules = true;
-    HMODULE modules[1024];
-    DWORD needed = 0;
-    if (!K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) return;
-    for (DWORD i = 0; i < std::min<DWORD>(needed / sizeof(HMODULE), 1024); ++i) {
-        wchar_t path[MAX_PATH];
-        if (!GetModuleFileNameW(modules[i], path, MAX_PATH)) continue;
-        std::filesystem::path p(path);
-        if (_wcsicmp(p.filename().c_str(), L"nvngx_dlss.dll") != 0) continue;
-        LOGD("loaded {} {}", p.string(), VersionString(DllVersion(path)));
-    }
-}
-
-// NGX frees a feature's resources at once, so a D3D12 feature is retired until the GPU has run the
-// frames that evaluated it (see d3d::Retire). Releasing it right away faulted the GPU when the
-// render size changed at run time.
-void ReleaseDlss(Feature& f) {
-    NVSDK_NGX_Handle* handle = f.dlss.handle;
-    if (!handle) return;
-    f.dlss.handle = nullptr;
-    if (f.api == Api::D3D12) {
-        d3d::RetireFeature([handle] {
-            NVSDK_NGX_Result r = NVSDK_NGX_D3D12_ReleaseFeature(handle);
-            if (NVSDK_NGX_FAILED(r)) LOGW("DLSS release failed ({:#x})", static_cast<unsigned>(r));
-        });
-        return;
-    }
-    NVSDK_NGX_Result r = NVSDK_NGX_D3D11_ReleaseFeature(handle);
-    if (NVSDK_NGX_FAILED(r)) LOGW("DLSS release failed ({:#x})", static_cast<unsigned>(r));
-}
-
-int CreateFlags(bool hdr) {
-    int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
-    if (g_config.hdr >= 0) hdr = g_config.hdr != 0;
-    if (hdr) flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
-    if (g_config.depthInverted) flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-    if (g_config.mvJittered) flags |= NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
-    if (g_config.autoExposure) flags |= NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+uint32_t BuildFsrFlags(bool hdr) {
+    uint32_t flags = 0;
+    if (g_config.hdr >= 0) hdr = (g_config.hdr != 0);
+    if (hdr) flags |= FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    if (g_config.depthInverted) flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
+    if (g_config.depthInfinite) flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
+    if (g_config.autoExposure) flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+    if (g_config.mvJittered) flags |= FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+    if (g_config.logLevel == LogLevel::Debug) flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
     return flags;
 }
 
-NVSDK_NGX_PerfQuality_Value QualityFor(unsigned in, unsigned out) {
-    float ratio = out ? static_cast<float>(in) / static_cast<float>(out) : 1.0f;
-    if (ratio >= 0.99f) return NVSDK_NGX_PerfQuality_Value_DLAA;
-    if (ratio >= 0.62f) return NVSDK_NGX_PerfQuality_Value_MaxQuality;
-    if (ratio >= 0.55f) return NVSDK_NGX_PerfQuality_Value_Balanced;
-    if (ratio >= 0.45f) return NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
-}
-
-bool EnsureDlss(Feature& f, void* cmd, unsigned inW, unsigned inH, unsigned outW, unsigned outH, int flags,
-                bool subrects) {
-    DlssInstance& d = f.dlss;
-    bool same = d.inWidth == inW && d.inHeight == inH && d.outWidth == outW && d.outHeight == outH &&
-                d.flags == flags && d.subrects == subrects && d.preset == g_config.preset;
-    if (d.handle && same) return true;
-    if (d.failed && same) return false;  // don't retry every frame
-    // Settings change mid-game on resolution changes and ini edits. On D3D12 the old feature lives
-    // on beside the new one until the GPU is done with it.
-    ReleaseDlss(f);
-    d = {};
-    d.inWidth = inW;
-    d.inHeight = inH;
-    d.outWidth = outW;
-    d.outHeight = outH;
-    d.flags = flags;
-    d.subrects = subrects;
-    d.preset = g_config.preset;
-    d.failed = true;
-
-    NVSDK_NGX_Parameter* p = g_modern.params;
-    for (const char* key : {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality})
-        NVSDK_NGX_Parameter_SetUI(p, key, g_config.preset);
-
-    NVSDK_NGX_DLSS_Create_Params create{};
-    create.Feature.InWidth = inW;
-    create.Feature.InHeight = inH;
-    create.Feature.InTargetWidth = outW;
-    create.Feature.InTargetHeight = outH;
-    create.Feature.InPerfQualityValue = QualityFor(inW, outW);
-    create.InFeatureCreateFlags = flags;
-    create.InEnableOutputSubrects = subrects;
-
-    NVSDK_NGX_Result r =
-        f.api == Api::D3D12
-            ? NGX_D3D12_CREATE_DLSS_EXT(static_cast<ID3D12GraphicsCommandList*>(cmd), 1, 1, &d.handle, p, &create)
-            : NGX_D3D11_CREATE_DLSS_EXT(static_cast<ID3D11DeviceContext*>(cmd), &d.handle, p, &create);
-    if (NVSDK_NGX_FAILED(r) || !d.handle) {
-        LOGE("DLSS create {}x{} -> {}x{} failed ({:#x})", inW, inH, outW, outH, static_cast<unsigned>(r));
-        d.handle = nullptr;
-        return false;
-    }
-    d.failed = false;
-    LOGI("DLSS feature created at the {} position: {}x{} -> {}x{}, quality {}, flags {:#x}, preset {}", f.Name(), inW,
-         inH, outW, outH, static_cast<int>(create.Feature.InPerfQualityValue), flags,
-         g_config.preset ? static_cast<char>('A' + g_config.preset - 1) : '-');
-    LogDlssModules();
-    return true;
-}
-
-struct EvalInputs {
-    void* color = nullptr;
-    void* output = nullptr;
-    void* motion = nullptr;
-    void* depth = nullptr;
-    unsigned colorX = 0, colorY = 0;    // render rectangle origin in the colour texture
-    unsigned motionX = 0, motionY = 0;  // ... in the motion vector and depth textures
-    unsigned width = 0, height = 0;     // render rectangle size
-    unsigned outputX = 0, outputY = 0;
-    float jitterX = 0, jitterY = 0;
-    int reset = 0;
-};
-
-NVSDK_NGX_Result RunDlss(Feature& f, void* cmd, const EvalInputs& in) {
-    if (f.api == Api::D3D12) {
-        NVSDK_NGX_D3D12_DLSS_Eval_Params e{};
-        e.Feature.pInColor = static_cast<ID3D12Resource*>(in.color);
-        e.Feature.pInOutput = static_cast<ID3D12Resource*>(in.output);
-        e.pInDepth = static_cast<ID3D12Resource*>(in.depth);
-        e.pInMotionVectors = static_cast<ID3D12Resource*>(in.motion);
-        e.InJitterOffsetX = in.jitterX;
-        e.InJitterOffsetY = in.jitterY;
-        e.InRenderSubrectDimensions = {in.width, in.height};
-        e.InReset = in.reset;
-        e.InMVScaleX = g_config.mvScaleX;
-        e.InMVScaleY = g_config.mvScaleY;
-        e.InColorSubrectBase = {in.colorX, in.colorY};
-        e.InDepthSubrectBase = {in.motionX, in.motionY};
-        e.InMVSubrectBase = {in.motionX, in.motionY};
-        e.InOutputSubrectBase = {in.outputX, in.outputY};
-        e.InPreExposure = g_config.preExposure;
-        e.InExposureScale = g_config.exposureScale;
-        return NGX_D3D12_EVALUATE_DLSS_EXT(static_cast<ID3D12GraphicsCommandList*>(cmd), f.dlss.handle,
-                                           g_modern.params, &e);
-    }
-    NVSDK_NGX_D3D11_DLSS_Eval_Params e{};
-    e.Feature.pInColor = static_cast<ID3D11Resource*>(in.color);
-    e.Feature.pInOutput = static_cast<ID3D11Resource*>(in.output);
-    e.pInDepth = static_cast<ID3D11Resource*>(in.depth);
-    e.pInMotionVectors = static_cast<ID3D11Resource*>(in.motion);
-    e.InJitterOffsetX = in.jitterX;
-    e.InJitterOffsetY = in.jitterY;
-    e.InRenderSubrectDimensions = {in.width, in.height};
-    e.InReset = in.reset;
-    e.InMVScaleX = g_config.mvScaleX;
-    e.InMVScaleY = g_config.mvScaleY;
-    e.InColorSubrectBase = {in.colorX, in.colorY};
-    e.InDepthSubrectBase = {in.motionX, in.motionY};
-    e.InMVSubrectBase = {in.motionX, in.motionY};
-    e.InOutputSubrectBase = {in.outputX, in.outputY};
-    e.InPreExposure = g_config.preExposure;
-    e.InExposureScale = g_config.exposureScale;
-    return NGX_D3D11_EVALUATE_DLSS_EXT(static_cast<ID3D11DeviceContext*>(cmd), f.dlss.handle, g_modern.params, &e);
-}
-
-// Runs DLSS into in.output (outWidth x outHeight at in.outputX/Y). With sharpening on, DLSS
-// writes the plugin's texture instead and the sharpening pass writes in.output from it.
-NVSDK_NGX_Result RunDlssSharpened(Feature& f, void* cmd, EvalInputs in, unsigned outWidth, unsigned outHeight) {
-    float strength = g_config.Sharpness();
-    void* output = in.output;
-    unsigned outX = in.outputX, outY = in.outputY;
-    void* sharpenInput = nullptr;
-    if (strength > 0.0f) {
-        auto format = static_cast<DXGI_FORMAT>(Info(f.api, output).format);
-        void* device = DeviceOf(f.api, cmd);
-        sharpenInput =
-            f.api == Api::D3D12
-                ? static_cast<void*>(sharpen::Target12(static_cast<ID3D12Device*>(device), outWidth, outHeight, format))
-                : static_cast<void*>(sharpen::Target11(static_cast<ID3D11Device*>(device), outWidth, outHeight, format));
-    }
-    if (sharpenInput) {
-        in.output = sharpenInput;
-        in.outputX = in.outputY = 0;
-    }
-    NVSDK_NGX_Result r = RunDlss(f, cmd, in);
-    if (sharpenInput && NVSDK_NGX_SUCCEED(r)) {
-        bool hdr = (f.dlss.flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
-        if (f.api == Api::D3D12)
-            sharpen::Apply12(static_cast<ID3D12GraphicsCommandList*>(cmd), static_cast<ID3D12Resource*>(output), outX,
-                             outY, g_config.sharpener, strength, hdr);
-        else
-            sharpen::Apply11(static_cast<ID3D11DeviceContext*>(cmd), static_cast<ID3D11Resource*>(output), outX, outY,
-                             g_config.sharpener, strength, hdr);
-    }
-    if (g_dumpOutputRequested && f.api == Api::D3D11) {
-        g_dumpOutputRequested = false;
-        if (d3d::DumpTexture11(static_cast<ID3D11DeviceContext*>(cmd), static_cast<ID3D11Resource*>(output),
-                               g_dataDir + L"\\output.bin"))
-            LOGI("output dump written");
-    }
-    return r;
-}
-
-void LogEvaluation(Feature& f, NVSDK_NGX_Result r, const EvalInputs& in, const d3d::TextureInfo& color,
-                   const d3d::TextureInfo& output, uint64_t frame) {
+void LogEvaluation(Feature& f, bool success, unsigned renderW, unsigned renderH,
+                   unsigned outW, unsigned outH, float jx, float jy, uint64_t frame, int reset) {
     uint64_t n = f.evaluations++;
-    if (in.reset) ++f.resets;
-    if (n < kDetailedEvaluations || NVSDK_NGX_FAILED(r)) {
-        LOGD("{} evaluate #{}: result {:#x}; colour {}x{} fmt {}, output {}x{} fmt {}; render {}x{} at {},{}; "
-             "jitter {:.4f},{:.4f} (frame {}); reset {}",
-             f.Name(), n, static_cast<unsigned>(r), color.width, color.height, color.format, output.width,
-             output.height, output.format, in.width, in.height, in.colorX, in.colorY, in.jitterX, in.jitterY, frame,
-             in.reset);
+    if (reset) ++f.resets;
+    if (n < kDetailedEvaluations || !success) {
+        LOGD("{} evaluate #{}: status {}; render {}x{}, output {}x{}; jitter {:.4f},{:.4f} (frame {}); reset {}",
+             f.Name(), n, success ? "OK" : "FAILED", renderW, renderH, outW, outH, jx, jy, frame, reset);
     } else if (g_config.verboseFrames && n < 40) {
-        LOGD("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, in.jitterX, in.jitterY, frame,
-             in.reset);
+        LOGD("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, jx, jy, frame, reset);
     } else if ((n & (n - 1)) == 0) {
-        // Resets are history restarts (camera cuts, loading); many of them look like aliasing. #512 is
-        // logged at Info as the sign that DLSS runs; test scripts wait for it.
-        Log(n == 512 ? LogLevel::Info : LogLevel::Debug, "{} evaluate #{} ok ({} resets since #{}; {})", f.Name(), n,
-            f.resets, n / 2, game::JitterStats());
+        Log(n == 512 ? LogLevel::Info : LogLevel::Debug,
+            "{} evaluate #{} ok ({} resets since #{}; {})",
+            f.Name(), n, f.resets, n / 2, game::JitterStats());
         f.resets = 0;
     }
 }
 
-// The game's DLSS 1 call inside its TAA pass. Colour, motion vectors and depth are at render
-// resolution; the output is the TAA history texture the rest of the frame reads.
 NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter* p) {
-    EvalInputs in;
-    in.color = GetResource(f.api, p, NVSDK_NGX_Parameter_Color);
-    in.output = GetResource(f.api, p, NVSDK_NGX_Parameter_Output);
-    in.motion = GetResource(f.api, p, NVSDK_NGX_Parameter_MotionVectors);
-    in.depth = GetResource(f.api, p, NVSDK_NGX_Parameter_Depth);
-    if (!in.color || !in.output || !in.motion || !in.depth) {
-        if (f.evaluations++ < kDetailedEvaluations)
-            LOGE("DLSS evaluate: missing input (colour {}, output {}, motion {}, depth {})", in.color, in.output,
-                 in.motion, in.depth);
+    if (f.api != Api::D3D12) {
+        LOGE("EvaluateAtTaa: DirectX 11 is not supported by MHW-FSR. Please switch to DirectX 12.");
+        return NVSDK_NGX_Result_FAIL_PlatformError;
+    }
+
+    auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmd);
+    ID3D12Resource* color = GetResource12(p, NVSDK_NGX_Parameter_Color);
+    ID3D12Resource* output = GetResource12(p, NVSDK_NGX_Parameter_Output);
+    ID3D12Resource* motion = GetResource12(p, NVSDK_NGX_Parameter_MotionVectors);
+    ID3D12Resource* depth = GetResource12(p, NVSDK_NGX_Parameter_Depth);
+
+    if (!color || !output || !motion || !depth) {
+        if (f.evaluations++ < kDetailedEvaluations) {
+            LOGE("FSR evaluate: missing input resource");
+        }
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
     }
-    d3d::TextureInfo color = Info(f.api, in.color);
-    d3d::TextureInfo output = Info(f.api, in.output);
-    Rect rect = RectFrom(p, color);
-    in.colorX = in.motionX = in.outputX = rect.x;
-    in.colorY = in.motionY = in.outputY = rect.y;
-    in.width = rect.width;
-    in.height = rect.height;
 
-    // The camera jitter is normalised by the output size, so in render pixels it shrinks with the
-    // render scale.
-    auto jitter = game::JitterForOutput(in.output);
+    d3d::TextureInfo colorInfo = Info(color);
+    d3d::TextureInfo outputInfo = Info(output);
+    Rect rect = RectFrom(p, colorInfo);
+
+    auto jitter = game::JitterForOutput(output);
     float scale = game::RenderScale();
-    in.jitterX = (jitter ? jitter->x : 0.0f) * g_config.jitterScaleX * scale;
-    in.jitterY = (jitter ? jitter->y : 0.0f) * g_config.jitterScaleY * scale;
-    // The game resets only when it rebuilds the TAA history; camera cuts come from the camera.
-    in.reset = GetI(p, NVSDK_NGX_Parameter_Reset) || (jitter && jitter->cut && g_config.cutReset);
+    float jx = (jitter ? jitter->x : 0.0f) * g_config.jitterScaleX * scale;
+    float jy = (jitter ? jitter->y : 0.0f) * g_config.jitterScaleY * scale;
+    int reset = GetI(p, NVSDK_NGX_Parameter_Reset) || (jitter && jitter->cut && g_config.cutReset);
     if (f.resetNext) {
         f.resetNext = false;
-        in.reset = 1;
+        reset = 1;
     }
     uint64_t frame = jitter ? jitter->frame : 0;
 
-    if (f.api == Api::D3D12) {
-        auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmd);
-        probe::Poll();
-        // In the upscaling modes the DLISP call probes its own input instead.
-        if (g_probeRequested && !game::DlispActive()) {
-            g_probeRequested = false;
-            probe::Schedule(cl, static_cast<ID3D12Resource*>(in.color), static_cast<ID3D12Resource*>(in.motion),
-                            static_cast<ID3D12Resource*>(in.depth), static_cast<ID3D12Resource*>(in.output));
-        }
-        probe::RecordFrame(cl, static_cast<ID3D12Resource*>(in.color), static_cast<ID3D12Resource*>(in.motion),
-                           static_cast<ID3D12Resource*>(in.depth), jitter ? jitter->x : 0.0f,
-                           jitter ? jitter->y : 0.0f);
+    probe::Poll();
+    if (g_probeRequested && !game::DlispActive()) {
+        g_probeRequested = false;
+        probe::Schedule(cl, color, motion, depth, output);
     }
+    probe::RecordFrame(cl, color, motion, depth, jitter ? jitter->x : 0.0f, jitter ? jitter->y : 0.0f);
 
     if (game::DlispActive()) {
-        // Upscaling: hand the jittered frame on unresolved and keep what DLSS needs for the
-        // DLISP call. The game reuses motion and depth targets later, so they are mirrored.
-        if (rect.x + rect.width > output.width || rect.y + rect.height > output.height) {
-            // A frame from across a render size change whose target has the other size already;
-            // a copy outside the target would be undefined on D3D12.
+        // Upscaling mode: pass jittered color on to output texture and mirror motion/depth
+        if (rect.x + rect.width > outputInfo.width || rect.y + rect.height > outputInfo.height) {
             g_upscale.valid = false;
             return NVSDK_NGX_Result_Success;
         }
-        if (f.api == Api::D3D12) {
-            auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmd);
-            d3d::CopyRect12(cl, static_cast<ID3D12Resource*>(in.output), static_cast<ID3D12Resource*>(in.color),
-                            rect.x, rect.y, rect.width, rect.height);
-            g_upscale.motion = g_upscale.motion12.Update(cl, static_cast<ID3D12Resource*>(in.motion));
-            g_upscale.depth = g_upscale.depth12.Update(cl, static_cast<ID3D12Resource*>(in.depth));
-        } else {
-            auto* ctx = static_cast<ID3D11DeviceContext*>(cmd);
-            d3d::CopyRect11(ctx, static_cast<ID3D11Resource*>(in.output), static_cast<ID3D11Resource*>(in.color),
-                            rect.x, rect.y, rect.width, rect.height);
-            g_upscale.motion = g_upscale.motion11.Update(ctx, static_cast<ID3D11Resource*>(in.motion));
-            g_upscale.depth = g_upscale.depth11.Update(ctx, static_cast<ID3D11Resource*>(in.depth));
-        }
-        g_upscale.valid = g_upscale.motion && g_upscale.depth;
+        d3d::CopyRect12(cl, output, color, rect.x, rect.y, rect.width, rect.height);
+        g_upscale.motion = g_upscale.motion12.Update(cl, motion);
+        g_upscale.depth = g_upscale.depth12.Update(cl, depth);
+        g_upscale.valid = (g_upscale.motion && g_upscale.depth);
         g_upscale.x = rect.x;
         g_upscale.y = rect.y;
         g_upscale.width = rect.width;
         g_upscale.height = rect.height;
-        g_upscale.jitterX = in.jitterX;
-        g_upscale.jitterY = in.jitterY;
-        g_upscale.reset = in.reset;
+        g_upscale.jitterX = jx;
+        g_upscale.jitterY = jy;
+        g_upscale.reset = reset;
         g_upscale.frame = frame;
-        if (f.evaluations++ < kDetailedEvaluations)
-            LOGD("DLSS evaluate: upscaling mode, render {}x{} passed on for DLISP", rect.width, rect.height);
+        if (jitter) {
+            g_upscale.cameraNear = jitter->cameraNear;
+            g_upscale.cameraFar = jitter->cameraFar;
+            g_upscale.cameraFov = jitter->fovY;
+        }
+
+        if (f.evaluations++ < kDetailedEvaluations) {
+            LOGD("FSR evaluate: upscaling mode, render {}x{} passed on for DLISP", rect.width, rect.height);
+        }
         return NVSDK_NGX_Result_Success;
     }
 
-    // DLAA does not use the copies the upscaling modes keep.
+    // NativeAA (DLAA equivalent) mode: FSR runs directly at TAA position
     g_upscale.valid = false;
     g_upscale.motion = g_upscale.depth = nullptr;
-    if (f.api == Api::D3D12) {
-        g_upscale.motion12.Reset();
-        g_upscale.depth12.Reset();
-    } else {
-        g_upscale.motion11.Reset();
-        g_upscale.depth11.Reset();
-    }
+    g_upscale.motion12.Reset();
+    g_upscale.depth12.Reset();
 
-    if (g_config.bypass) return NVSDK_NGX_Result_Success;  // the game's TAA result stays
+    if (g_config.bypass) return NVSDK_NGX_Result_Success;
     if (StaleFrame(f, rect.width, rect.height)) return NVSDK_NGX_Result_Success;
-    if (!EnsureModern(f.api, DeviceOf(f.api, cmd))) return NVSDK_NGX_Result_Fail;
-    bool hdr = GetI(p, "Hint.HDR", 1) != 0;
-    bool subrects = rect.x || rect.y || rect.width != output.width || rect.height != output.height;
-    if (!EnsureDlss(f, cmd, rect.width, rect.height, rect.width, rect.height, CreateFlags(hdr), subrects))
-        return NVSDK_NGX_Result_Fail;
+
+    ID3D12Device* device = DeviceOf(cl);
+    if (!device) return NVSDK_NGX_Result_Fail;
+
+    bool hdr = (GetI(p, "Hint.HDR", 1) != 0) || d3d::IsFloatFormat(colorInfo.format);
+    uint32_t flags = BuildFsrFlags(hdr);
+    uint64_t versionId = loader::ResolveVersionId(device, g_config.version);
+
+    FsrContext::Settings s{};
+    s.renderW = rect.width;
+    s.renderH = rect.height;
+    s.upscaleW = outputInfo.width;
+    s.upscaleH = outputInfo.height;
+    s.flags = flags;
+    s.versionId = versionId;
+
+    if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
+
     game::NoteDlssEvaluated();
-    NVSDK_NGX_Result r = RunDlssSharpened(f, cmd, in, rect.width, rect.height);
-    LogEvaluation(f, r, in, color, output, frame);
-    return r;
+
+    FsrContext::DispatchParams dp{};
+    dp.commandList = cl;
+    dp.color = color;
+    dp.depth = depth;
+    dp.motion = motion;
+    dp.output = output;
+    dp.jitterX = jx;
+    dp.jitterY = jy;
+    dp.motionScaleX = g_config.mvScaleX;
+    dp.motionScaleY = g_config.mvScaleY;
+    dp.renderW = rect.width;
+    dp.renderH = rect.height;
+    dp.upscaleW = outputInfo.width;
+    dp.upscaleH = outputInfo.height;
+    dp.sharpness = g_config.Sharpness();
+    dp.frameTimeDeltaMs = GetFrameDeltaTimeMs();
+    dp.preExposure = g_config.preExposure;
+    dp.cameraNear = jitter ? jitter->cameraNear : 0.1f;
+    dp.cameraFar = jitter ? jitter->cameraFar : 10000.0f;
+    dp.cameraFovAngleVertical = jitter ? jitter->fovY : 0.785398f;
+    dp.reset = (reset != 0);
+
+    bool ok = f.fsr.Dispatch(dp);
+    LogEvaluation(f, ok, rect.width, rect.height, outputInfo.width, outputInfo.height, jx, jy, frame, reset);
+    return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }
 
-// The game's DLISP call: scales the post-processed frame from the render rectangle up to the
-// output texture. With DLSS it is the point where the upscale happens.
 NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Parameter* p) {
-    EvalInputs in;
-    in.color = GetResource(f.api, p, NVSDK_NGX_Parameter_Color);
-    in.output = GetResource(f.api, p, NVSDK_NGX_Parameter_Output);
-    if (!in.color || !in.output) return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    if (f.api != Api::D3D12) {
+        return NVSDK_NGX_Result_FAIL_PlatformError;
+    }
+
+    auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmd);
+    ID3D12Resource* color = GetResource12(p, NVSDK_NGX_Parameter_Color);
+    ID3D12Resource* output = GetResource12(p, NVSDK_NGX_Parameter_Output);
+
+    if (!color || !output) return NVSDK_NGX_Result_FAIL_InvalidParameter;
     if (!g_upscale.valid) {
-        // Happens on screens without a 3D frame (the intro logos) and on the odd transition frame.
         static bool logged = false;
         if (!logged) {
             logged = true;
-            LOGD("DLISP called without a TAA pass before it (intro or loading screen); frame left to the game");
+            LOGD("DLISP called without valid TAA inputs (menu or transition); frame left untouched");
         }
         return NVSDK_NGX_Result_Fail;
     }
     g_upscale.valid = false;
 
-    d3d::TextureInfo color = Info(f.api, in.color);
-    d3d::TextureInfo output = Info(f.api, in.output);
-    Rect rect = RectFrom(p, color);
-    in.motion = g_upscale.motion;
-    in.depth = g_upscale.depth;
-    in.colorX = rect.x;
-    in.colorY = rect.y;
-    in.motionX = g_upscale.x;
-    in.motionY = g_upscale.y;
-    in.width = std::min(rect.width, g_upscale.width);
-    in.height = std::min(rect.height, g_upscale.height);
-    in.jitterX = g_upscale.jitterX;
-    in.jitterY = g_upscale.jitterY;
-    in.reset = g_upscale.reset;
+    d3d::TextureInfo colorInfo = Info(color);
+    d3d::TextureInfo outputInfo = Info(output);
+    Rect rect = RectFrom(p, colorInfo);
+
+    unsigned inW = std::min(rect.width, g_upscale.width);
+    unsigned inH = std::min(rect.height, g_upscale.height);
+    float jx = g_upscale.jitterX;
+    float jy = g_upscale.jitterY;
+    int reset = g_upscale.reset;
     if (f.resetNext) {
         f.resetNext = false;
-        in.reset = 1;
+        reset = 1;
     }
 
-    if (StaleFrame(f, in.width, in.height)) return NVSDK_NGX_Result_Success;
-    if (g_probeRequested && f.api == Api::D3D12) {
+    if (StaleFrame(f, inW, inH)) return NVSDK_NGX_Result_Success;
+
+    if (g_probeRequested) {
         g_probeRequested = false;
-        probe::Schedule(static_cast<ID3D12GraphicsCommandList*>(cmd), static_cast<ID3D12Resource*>(in.color), nullptr,
-                        nullptr, static_cast<ID3D12Resource*>(in.output));
+        probe::Schedule(cl, color, nullptr, nullptr, output);
     }
-    if (!EnsureModern(f.api, DeviceOf(f.api, cmd))) return NVSDK_NGX_Result_Fail;
-    if (!EnsureDlss(f, cmd, in.width, in.height, output.width, output.height,
-                    CreateFlags(d3d::IsFloatFormat(color.format)), false))
-        return NVSDK_NGX_Result_Fail;
-    game::NoteDlssEvaluated();
-    NVSDK_NGX_Result r = RunDlssSharpened(f, cmd, in, output.width, output.height);
-    LogEvaluation(f, r, in, color, output, g_upscale.frame);
-    return r;
-}
 
-// ---------------------------------------------------------------------------------------------
-// The functions placed into the game's NGX table.
+    ID3D12Device* device = DeviceOf(cl);
+    if (!device) return NVSDK_NGX_Result_Fail;
+
+    bool hdr = d3d::IsFloatFormat(colorInfo.format);
+    uint32_t flags = BuildFsrFlags(hdr);
+    uint64_t versionId = loader::ResolveVersionId(device, g_config.version);
+
+    FsrContext::Settings s{};
+    s.renderW = inW;
+    s.renderH = inH;
+    s.upscaleW = outputInfo.width;
+    s.upscaleH = outputInfo.height;
+    s.flags = flags;
+    s.versionId = versionId;
+
+    if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
+
+    game::NoteDlssEvaluated();
+
+    FsrContext::DispatchParams dp{};
+    dp.commandList = cl;
+    dp.color = color;
+    dp.depth = g_upscale.depth;
+    dp.motion = g_upscale.motion;
+    dp.output = output;
+    dp.jitterX = jx;
+    dp.jitterY = jy;
+    dp.motionScaleX = g_config.mvScaleX;
+    dp.motionScaleY = g_config.mvScaleY;
+    dp.renderW = inW;
+    dp.renderH = inH;
+    dp.upscaleW = outputInfo.width;
+    dp.upscaleH = outputInfo.height;
+    dp.sharpness = g_config.Sharpness();
+    dp.frameTimeDeltaMs = GetFrameDeltaTimeMs();
+    dp.preExposure = g_config.preExposure;
+    dp.cameraNear = g_upscale.cameraNear;
+    dp.cameraFar = g_upscale.cameraFar;
+    dp.cameraFovAngleVertical = g_upscale.cameraFov;
+    dp.reset = (reset != 0);
+
+    bool ok = f.fsr.Dispatch(dp);
+    LogEvaluation(f, ok, inW, inH, outputInfo.width, outputInfo.height, jx, jy, g_upscale.frame, reset);
+    return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
+}
 
 NVSDK_NGX_Result ShimShutdown(Api api) {
     std::lock_guard lock(g_mutex);
     LOGD("game called NGX {} Shutdown", ApiName(api));
-    for (auto& f : g_features)
-        if (f->api == api) ReleaseDlss(*f);
-    // Only what belongs to this API: both tables are hooked, and the game may shut down the one it
-    // does not render with.
+    for (auto& f : g_features) {
+        if (f->api == api) {
+            f->fsr.Shutdown();
+        }
+    }
     g_upscale.valid = false;
     g_upscale.motion = g_upscale.depth = nullptr;
     if (api == Api::D3D12) {
         g_upscale.motion12.Reset();
         g_upscale.depth12.Reset();
-    } else {
-        g_upscale.motion11.Reset();
-        g_upscale.depth11.Reset();
-    }
-    sharpen::Release(api == Api::D3D12);
-    if (g_modern.api == api) {
-        // NGX would free remaining features itself when it shuts down, so the retired ones go now.
-        // Textures stay retired. The game shuts NGX down when it stops rendering (seen at exit).
         d3d::RetireFlushFeatures();
-        ShutdownModern();
-    }
-    if (auto legacy = reinterpret_cast<PfnShutdown>(State(api).legacy.shutdown)) {
-        legacy();
-        State(api).legacy = {};
     }
     return NVSDK_NGX_Result_Success;
 }
@@ -819,10 +505,9 @@ NVSDK_NGX_Result ShimCreate(Api api, void*, NVSDK_NGX_Feature id, NVSDK_NGX_Para
     Feature* f = AddFeature(api, id, nullptr);
     f->expectedWidth = GetUI(params, NVSDK_NGX_Parameter_Width);
     f->expectedHeight = GetUI(params, NVSDK_NGX_Parameter_Height);
-    LOGD("game created {} ({}): {}x{} -> {}x{}, HDR {}", f->Name(), ApiName(api),
+    LOGD("game created {} ({}): {}x{} -> {}x{}", f->Name(), ApiName(api),
          GetUI(params, NVSDK_NGX_Parameter_Width), GetUI(params, NVSDK_NGX_Parameter_Height),
-         GetUI(params, NVSDK_NGX_Parameter_OutWidth), GetUI(params, NVSDK_NGX_Parameter_OutHeight),
-         GetI(params, "Hint.HDR"));
+         GetUI(params, NVSDK_NGX_Parameter_OutWidth), GetUI(params, NVSDK_NGX_Parameter_OutHeight));
     *out = f->Handle();
     return NVSDK_NGX_Result_Success;
 }
@@ -831,8 +516,6 @@ NVSDK_NGX_Result ShimEvaluate(Api api, void* cmd, const NVSDK_NGX_Handle* handle
                               void*) {
     std::lock_guard lock(g_mutex);
     if (!params) return NVSDK_NGX_Result_FAIL_InvalidParameter;
-    // A frame recorded before a resolution change can still evaluate the DLISP handle the game
-    // has released and cleared in the meantime.
     if (!handle) return NVSDK_NGX_Result_FAIL_FeatureNotFound;
     Feature* f = FindFeature(handle);
     if (!f || f->api != api) {
@@ -846,7 +529,7 @@ NVSDK_NGX_Result ShimEvaluate(Api api, void* cmd, const NVSDK_NGX_Handle* handle
     return f->id == NVSDK_NGX_Feature_SuperSampling ? EvaluateAtTaa(*f, cmd, params) : EvaluateAtDlisp(*f, cmd, params);
 }
 
-NVSDK_NGX_Result ShimRelease(Api api, NVSDK_NGX_Handle* handle) {
+NVSDK_NGX_Result ShimRelease(Api /*api*/, NVSDK_NGX_Handle* handle) {
     std::lock_guard lock(g_mutex);
     auto it = std::find_if(g_features.begin(), g_features.end(), [&](const auto& f) {
         return f->Handle() == handle || (f->legacy && f->legacy == handle);
@@ -854,25 +537,22 @@ NVSDK_NGX_Result ShimRelease(Api api, NVSDK_NGX_Handle* handle) {
     if (it == g_features.end()) return NVSDK_NGX_Result_Success;
     Feature& f = **it;
     LOGD("game released {} feature {:#x}", f.Name(), f.handle.id);
-    ReleaseDlss(f);
-    if (f.legacy) {
-        if (auto release = reinterpret_cast<PfnRelease>(State(api).legacy.release)) release(f.legacy);
-    }
+    f.fsr.Retire();
     g_features.erase(it);
     return NVSDK_NGX_Result_Success;
 }
 
-bool IsNvidiaGpu();
-
 template <Api A>
 struct Entry {
-    // Reached when the game initialises NGX through the plugin's entries (see HookNgxLookups) or
-    // re-initialises it. The plugin initialises its own NGX lazily; without an NVIDIA GPU the game
-    // is told NGX failed, as the NGX 1.x core would.
     static NVSDK_NGX_Result NVSDK_CONV Init(unsigned long long, const wchar_t*, void*, NVSDK_NGX_Version) {
-        static const bool nvidia = IsNvidiaGpu();
-        if (!nvidia) LOGI("game initialised NGX {}: no NVIDIA GPU, DLSS stays off", ApiName(A));
-        return nvidia ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_FAIL_PlatformError;
+        // Unconditionally succeed for DX12 so in-game UI unlocks regardless of GPU manufacturer
+        if constexpr (A == Api::D3D12) {
+            LOGI("Game initialized NGX D3D12 -> MHW-FSR ready");
+            return NVSDK_NGX_Result_Success;
+        } else {
+            LOGW("Game initialized NGX D3D11 -> MHW-FSR requires DirectX 12");
+            return NVSDK_NGX_Result_FAIL_PlatformError;
+        }
     }
     static NVSDK_NGX_Result NVSDK_CONV Shutdown() { return ShimShutdown(A); }
     static NVSDK_NGX_Result NVSDK_CONV Scratch(NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, size_t* size) {
@@ -902,16 +582,13 @@ struct Entry {
     }
 };
 
-// ---------------------------------------------------------------------------------------------
-// Locating and patching the table.
-
-// First `mov r64, [rip+disp32]` in the function: the table slot the export reads.
 void** SlotOf(HMODULE exe, const char* exportName) {
     auto* code = reinterpret_cast<uint8_t*>(GetProcAddress(exe, exportName));
     if (!code) return nullptr;
     for (int i = 0; i < 0x40; ++i) {
-        if ((code[i] == 0x48 || code[i] == 0x4c) && code[i + 1] == 0x8b && (code[i + 2] & 0xc7) == 0x05)
+        if ((code[i] == 0x48 || code[i] == 0x4c) && code[i + 1] == 0x8b && (code[i + 2] & 0xc7) == 0x05) {
             return reinterpret_cast<void**>(mem::RipTarget(code + i + 3, code + i + 7));
+        }
     }
     return nullptr;
 }
@@ -942,47 +619,20 @@ Table* FindTable(HMODULE exe, Api api) {
     return table;
 }
 
-// (Re)applies the shim entries. The game's NGX init rewrites the table, so this also runs per frame.
 void PatchTable(ApiState& s, Api api, bool initial) {
     if (!s.table) return;
     Table current = *s.table;
     if (current.create == s.shim.create) return;
-    // Remember whatever the legacy core installed, ignoring empty slots from a failed init.
     if (current.create) s.legacy = current;
     void** slots = reinterpret_cast<void**>(s.table);
     const void* const* values = reinterpret_cast<const void* const*>(&s.shim);
     for (int i = 0; i < 7; ++i) mem::WritePointer(slots + i, const_cast<void*>(values[i]));
-    if (initial)
-        LOGD("NGX {} table hooked (legacy core {})", ApiName(api), s.legacy.create ? "loaded" : "not loaded");
-    else
+    if (initial) {
+        LOGD("NGX {} table hooked", ApiName(api));
+    } else {
         LOGW("NGX {} table was rewritten by the game, hooked again", ApiName(api));
-}
-
-bool IsNvidiaGpu() {
-    // dxgi.dll is resolved at run time so loading the plugin never pulls it in.
-    HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
-    if (!dxgi) dxgi = LoadLibraryW(L"dxgi.dll");
-    auto create = dxgi ? reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(dxgi, "CreateDXGIFactory1"))
-                       : nullptr;
-    ComPtr<IDXGIFactory1> factory;
-    if (!create || FAILED(create(IID_PPV_ARGS(&factory)))) return false;
-    ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-        DXGI_ADAPTER_DESC1 desc;
-        if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == 0x10de) return true;
     }
-    return false;
 }
-
-// ---------------------------------------------------------------------------------------------
-// Loaders that load plugins early (SharpPluginLoader preloads Stracker's Loader) put the plugin in
-// place before the game's renderer and its NGX 1.x init. That init clears the function table,
-// loads the driver's NGX 1.x core and fills the table through the exe's GetProcAddress import.
-// Left alone, the game then sets DLSS up with the NGX 1.x core: DLSS 1's upscaler alone (DLISP at
-// 0.75) with no DLSS pass the plugin could feed, so nothing wrote the frame (a grey screen), and
-// switching the game to a DLSS pass afterwards crashed its render thread. So when the renderer does
-// not exist yet, those lookups get the plugin's entries, and the game sets DLSS up through the
-// plugin from the start, as when the plugin is loaded after that init.
 
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 GetProcAddressFn g_realGetProcAddress = nullptr;
@@ -990,7 +640,6 @@ GetProcAddressFn g_realGetProcAddress = nullptr;
 FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
     FARPROC real = g_realGetProcAddress(module, name);
     if (!real || IS_INTRESOURCE(name) || std::strncmp(name, "NVSDK_NGX_D3D1", 14) != 0) return real;
-    // Same order as Table.
     static constexpr const char* kEntries[] = {"Init",          "Shutdown",        "GetScratchBufferSize",
                                                "GetParameters", "CreateFeature",   "EvaluateFeature",
                                                "ReleaseFeature"};
@@ -1007,7 +656,6 @@ FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
     return real;
 }
 
-// The exe's import slot for GetProcAddress, taken from the calls in the NGX init exports.
 void** FindGetProcAddressSlot(HMODULE exe) {
     void* real[3] = {reinterpret_cast<void*>(&GetProcAddress), nullptr, nullptr};
     if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll")) real[1] = reinterpret_cast<void*>(GetProcAddress(k32, "GetProcAddress"));
@@ -1016,7 +664,7 @@ void** FindGetProcAddressSlot(HMODULE exe) {
         auto* code = reinterpret_cast<uint8_t*>(GetProcAddress(exe, exportName));
         if (!code) continue;
         for (int i = 0; i < 0x200; ++i) {
-            if (code[i] != 0xff || code[i + 1] != 0x15) continue;  // call [rip+disp32]
+            if (code[i] != 0xff || code[i + 1] != 0x15) continue;
             auto** slot = reinterpret_cast<void**>(mem::RipTarget(code + i + 2, code + i + 6));
             void* value = mem::SafeRead<void*>(slot).value_or(nullptr);
             if (value && (value == real[0] || value == real[1] || value == real[2])) return slot;
@@ -1028,21 +676,15 @@ void** FindGetProcAddressSlot(HMODULE exe) {
 void HookNgxLookups(HMODULE exe) {
     void** slot = FindGetProcAddressSlot(exe);
     if (!slot) {
-        LOGW("loaded before the game's renderer, but the GetProcAddress import of its NGX init was not found; "
-             "DLSS may need to be turned off and on in the graphics options");
+        LOGW("Loaded before renderer, but GetProcAddress import not found");
         return;
     }
     g_realGetProcAddress = reinterpret_cast<GetProcAddressFn>(*slot);
     mem::WritePointer(slot, reinterpret_cast<void*>(&HookGetProcAddress));
-    LOGD("loaded before the game's renderer: its NGX init will get the plugin's entries (import slot +{:#x})",
-         reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(exe));
+    LOGD("Hooked GetProcAddress import for early NGX init");
 }
 
-// Makes the game's DLSS context use our parameter object, adopting features the legacy core
-// created before the plugin was loaded. Builds the context when the game skipped it because the
-// legacy core refused DLSS (e.g. a current nvngx_dlss.dll in the game folder). `mayUseDxgi` is
-// false under the loader lock; the GPU vendor check then waits for the first frame.
-void AdoptContext(bool mayUseDxgi) {
+void AdoptContext(bool /*mayUseDxgi*/) {
     game::DlssContext* ctx = game::Context();
     if (ctx) {
         if (ctx->params == &g_params) return;
@@ -1051,101 +693,67 @@ void AdoptContext(bool mayUseDxgi) {
         g_legacyParams = static_cast<NVSDK_NGX_Parameter*>(ctx->params);
         ctx->params = &g_params;
         Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
-        if (ctx->dlssHandle && !FindFeature(static_cast<NVSDK_NGX_Handle*>(ctx->dlssHandle)))
+        if (ctx->dlssHandle && !FindFeature(static_cast<NVSDK_NGX_Handle*>(ctx->dlssHandle))) {
             AddFeature(api, NVSDK_NGX_Feature_SuperSampling, static_cast<NVSDK_NGX_Handle*>(ctx->dlssHandle));
-        if (ctx->dlispHandle && !FindFeature(static_cast<NVSDK_NGX_Handle*>(ctx->dlispHandle)))
+        }
+        if (ctx->dlispHandle && !FindFeature(static_cast<NVSDK_NGX_Handle*>(ctx->dlispHandle))) {
             AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, static_cast<NVSDK_NGX_Handle*>(ctx->dlispHandle));
+        }
         LeaveCriticalSection(lock);
-        int legacyDlss = -1;
-        if (g_legacyParams) g_legacyParams->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &legacyDlss);
-        LOGD("DLSS context adopted (game's NGX 1.x reported DLSS available {}; existing DLSS {}, DLISP {})",
-             legacyDlss, ctx->dlssHandle, ctx->dlispHandle);
-        g_adoptedLate = mayUseDxgi;  // after Install, which refreshes the render scale itself
+        LOGD("Adopted game DLSS context");
         return;
     }
+
     if (g_contextCreated || g_fallbackChecked) return;
-    if (!game::Device()) return;  // renderer not up yet
-    bool legacyLoaded = g_api[0].legacy.create || g_api[1].legacy.create;
-    if (!legacyLoaded && !mayUseDxgi) return;
+    if (!game::Device()) return;
     g_fallbackChecked = true;
 
     auto dx12 = game::IsDx12();
-    if (!dx12) {
-        LOGW("no DLSS context and the renderer API is unknown; DLSS stays unavailable");
+    if (!dx12 || !*dx12) {
+        LOGW("Renderer is not running in DirectX 12 mode; FSR unavailable");
         return;
     }
-    if (!legacyLoaded && !IsNvidiaGpu()) {
-        LOGI("no NVIDIA GPU, leaving DLSS off");
-        return;
-    }
+
     auto* mem = static_cast<game::DlssContext*>(game::GameAlloc(sizeof(game::DlssContext)));
     if (!mem) {
-        LOGE("cannot allocate the DLSS context");
+        LOGE("Cannot allocate DLSS context for FSR");
         return;
     }
     std::memset(mem, 0, sizeof(*mem));
     InitializeCriticalSection(reinterpret_cast<CRITICAL_SECTION*>(mem->lock));
     mem->params = &g_params;
-    if (!*dx12) mem->d3d11Context = game::ImmediateContext11();
     game::SetContext(mem);
     g_contextCreated = true;
-    LOGI("game had no DLSS context ({} the NGX 1.x core); created one, DLSS can now be enabled in the "
-         "graphics options",
-         legacyLoaded ? "DLSS was refused by" : "no");
+    LOGI("Created game DLSS context for MHW-FSR");
 }
 
-// At every TAA pass build: worker threads, possibly several per frame and at the same time.
 void OnFrame() {
     std::lock_guard lock(g_mutex);
     PatchTable(g_api[0], Api::D3D11, false);
     PatchTable(g_api[1], Api::D3D12, false);
     AdoptContext(true);
 
-    // The game creates its DLISP feature only when DLSS is (re)created. After switching from DLAA
-    // to an upscaling mode at run time, give it one so the DLISP pass has a handle to use.
     if (game::DlispActive()) {
         game::DlssContext* ctx = game::Context();
         if (ctx && !ctx->dlispHandle) {
             Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
             ctx->dlispHandle = AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, nullptr)->Handle();
-            LOGD("attached a DLISP feature for the upscaling mode");
+            LOGD("Attached DLISP feature for upscaling mode");
         }
-    }
-
-    static game::RendererState lastState;
-    game::RendererState state = game::ReadState();
-    if (!(state == lastState)) {
-        LOGD("renderer: {}", game::DescribeState(state));
-        lastState = state;
     }
 }
 
 void ReloadSettings(bool& recompute);
 
-// Once per frame on the game's main thread, where the game applies graphics options itself.
 void OnUpdate() {
     bool recompute = false;
     {
         std::lock_guard lock(g_mutex);
-        // Also here and not only at TAA pass builds: those stop while the game's TAA is off.
         PatchTable(g_api[0], Api::D3D11, false);
         PatchTable(g_api[1], Api::D3D12, false);
         AdoptContext(true);
         d3d::RetireTick(game::Frame());
-        // The game set DLSS up through the NGX 1.x core before the context was adopted (normally
-        // prevented by HookNgxLookups). With a DLSS pass, asking again is a Mode switch. Without one
-        // (DLSS 1's upscaler alone) switching at run time crashed the game's render thread, so
-        // that is left to the game's own options.
-        if (g_adoptedLate) {
-            g_adoptedLate = false;
-            if (game::DlssEnabledInGame()) {
-                LOGD("the game set DLSS up before the plugin took over; asking it for the render scale again");
-                recompute = true;
-            } else if (game::DlssOptionOn()) {
-                LOGW("the game set DLSS up with DLSS 1's upscaler before the plugin took over; turn NVIDIA DLSS "
-                     "off and on in the graphics options");
-            }
-        }
+
         static ULONGLONG nextReload = 0;
         ULONGLONG now = GetTickCount64();
         if (now >= nextReload) {
@@ -1153,44 +761,32 @@ void OnUpdate() {
             ReloadSettings(recompute);
         }
     }
-    // Outside the lock: the game's recompute releases and creates its DLSS features through the
-    // shim and may wait for the render thread, which takes the lock to evaluate.
-    if (recompute && game::RecomputeRenderScale()) LOGD("render scale refreshed");
+    if (recompute && game::RecomputeRenderScale()) {
+        LOGD("Render scale refreshed after config reload");
+    }
 }
 
-// Twice a second: the ini and graphics_option.ini (a timestamp check each). Sets `recompute` when
-// the render scale may have changed.
 void ReloadSettings(bool& recompute) {
     if (ReloadConfigIfChanged()) {
         game::ApplyConfig(g_config);
-        reflex::Configure(g_config);
         LogSetLevel(g_config.logLevel);
-        LOGI("ini reloaded: mode {}, preset {}, depth inverted {}, MV scale {},{}, jitter scale {},{}, auto "
-             "exposure {}, reflection fix {}, bypass {}, Reflex {}, frame limit {}",
-             QualityModeName(g_config.mode), g_config.preset, g_config.depthInverted, g_config.mvScaleX,
-             g_config.mvScaleY, g_config.jitterScaleX, g_config.jitterScaleY, g_config.autoExposure,
-             g_config.reflectionFix, g_config.bypass, ReflexModeName(g_config.reflex), g_config.frameLimit);
+        LOGI("MHW-FSR ini reloaded: mode {}, sharpness {:.2f}, autoExposure {}, depthInverted {}, MV scale {},{}, jitter scale {},{}, bypass {}",
+             QualityModeName(g_config.mode), g_config.Sharpness(), g_config.autoExposure,
+             g_config.depthInverted, g_config.mvScaleX, g_config.mvScaleY,
+             g_config.jitterScaleX, g_config.jitterScaleY, g_config.bypass);
+
         for (auto& f : g_features) {
-            f->dlss.failed = false;  // allow a retry with the new settings
-            f->evaluations = 0;      // log the next evaluations in detail again
-            f->resetNext = true;     // start from an empty history
+            f->evaluations = 0;
+            f->resetNext = true;
         }
         g_probeRequested = g_config.debugProbe;
-        g_dumpOutputRequested = g_config.debugDumpOutput;
-        if (g_config.debugDumpFrames > 0)
+        if (g_config.debugDumpFrames > 0) {
             probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
                                     static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
+        }
         if (game::DlssOptionOn()) recompute = true;
     }
     ReloadGameOptionsIfChanged();
-    static float lastSharpness = -1.0f;
-    static Sharpener lastSharpener = Sharpener::NVSharpen;
-    if (g_config.Sharpness() != lastSharpness || g_config.sharpener != lastSharpener) {
-        lastSharpness = g_config.Sharpness();
-        lastSharpener = g_config.sharpener;
-        LOGI("sharpening {:.2f} with {} (from {})", lastSharpness, SharpenerName(lastSharpener),
-             g_config.sharpness < 0.0f ? "the game's DLSS Sharpness option" : "the ini");
-    }
 }
 
 bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
@@ -1199,16 +795,17 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     g_gameDir = gameDir;
 
     g_params.Set(NVSDK_NGX_Parameter_SuperSampling_Available, 1);
-    g_params.Set("ImageSignalProcessing.Available", 1);  // DLISP, NGX 1.x only
+    g_params.Set("ImageSignalProcessing.Available", 1);
     g_params.Set(NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, reinterpret_cast<void*>(&OptimalSettingsCallback));
 
     HMODULE exe = GetModuleHandleW(nullptr);
     g_api[0].table = FindTable(exe, Api::D3D11);
     g_api[1].table = FindTable(exe, Api::D3D12);
     if (!g_api[0].table && !g_api[1].table) {
-        LOGE("NGX function tables not found");
+        LOGE("NGX function tables not found in game exe");
         return false;
     }
+
     g_api[0].shim = Entry<Api::D3D11>::Make();
     g_api[1].shim = Entry<Api::D3D12>::Make();
     PatchTable(g_api[0], Api::D3D11, true);
@@ -1218,7 +815,7 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     if (!game::Device()) HookNgxLookups(exe);
     game::SetFrameCallback(&OnFrame);
     game::SetUpdateCallback(&OnUpdate);
-    LOGD("renderer at install: {}", game::DescribeState());
+    LOGD("Renderer at MHW-FSR install: {}", game::DescribeState());
     return true;
 }
 
@@ -1226,11 +823,10 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
 
 bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
     if (!InstallTables(dataDir, gameDir)) return false;
-    // Outside the lock (see OnUpdate). The game picked its render scale with the old callback
-    // before we were loaded.
-    if (game::Context() && game::DlssEnabledInGame() && game::RecomputeRenderScale())
-        LOGD("DLSS was already on, render scale refreshed");
+    if (game::Context() && game::DlssEnabledInGame() && game::RecomputeRenderScale()) {
+        LOGD("FSR was already on, render scale refreshed");
+    }
     return true;
 }
 
-}  // namespace mhwdlss::ngx
+}  // namespace mhwfsr::ngx

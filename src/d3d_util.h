@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace mhwdlss::d3d {
+namespace mhwfsr::d3d {
 
 using Microsoft::WRL::ComPtr;
 
@@ -70,4 +70,4 @@ void CopyRect11(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* s
 // Debug: writes an R11G11B10 texture to `path` as uint32 width, height, float RGB.
 bool DumpTexture11(ID3D11DeviceContext* ctx, ID3D11Resource* texture, const std::wstring& path);
 
-}  // namespace mhwdlss::d3d
+}  // namespace mhwfsr::d3d

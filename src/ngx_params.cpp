@@ -1,8 +1,6 @@
 #include "ngx_params.h"
 
-#include <nvsdk_ngx_params.h>
-
-namespace mhwdlss {
+namespace mhwfsr {
 
 void ShimParameters::Store(const char* name, const Value& v) {
     if (!name) return;
@@ -146,4 +144,4 @@ void ShimParameters::CopyNumbersTo(NVSDK_NGX_Parameter* other) const {
     }
 }
 
-}  // namespace mhwdlss
+}  // namespace mhwfsr

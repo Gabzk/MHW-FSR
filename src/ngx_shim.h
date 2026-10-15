@@ -2,10 +2,9 @@
 
 #include <string>
 
-namespace mhwdlss::ngx {
+namespace mhwfsr::ngx {
 
-// Redirects the game's NGX 1.x calls to the shim. `dataDir` is where NGX may write files and
-// where the plugin keeps its DLSS DLLs; `gameDir` is the game folder.
+// Redirects the game's NGX 1.x calls to the shim and initializes FSR backend.
 bool Install(const std::wstring& dataDir, const std::wstring& gameDir);
 
-}  // namespace mhwdlss::ngx
+}  // namespace mhwfsr::ngx

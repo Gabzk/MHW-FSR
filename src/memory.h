@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mhwdlss::mem {
+namespace mhwfsr::mem {
 
 struct Section {
     uint8_t* begin = nullptr;
@@ -45,4 +45,4 @@ std::optional<T> SafeRead(const void* src) {
     return value;
 }
 
-}  // namespace mhwdlss::mem
+}  // namespace mhwfsr::mem

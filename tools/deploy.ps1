@@ -1,23 +1,20 @@
 # Copies the built plugin into the game for testing, or removes it again.
-#   deploy.ps1            install build\MHW-DLSS4.dll
-#   deploy.ps1 -Dlss <p>  also copy a nvngx_dlss.dll into the plugin folder (the plugin prefers the
-#                         driver's DLSS unless this one is newer)
+#   deploy.ps1            install build\MHW-FSR.dll and FSR binaries
 #   deploy.ps1 -Remove    delete everything this script installed
 param(
-    [string]$GameDir = 'F:\SteamLibrary\steamapps\common\Monster Hunter World',
-    [string]$Dlss,
+    [string]$GameDir = 'C:\Program Files (x86)\Steam\steamapps\common\Monster Hunter World',
     [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
 $plugins = Join-Path $GameDir 'nativePC\plugins'
-$dataDir = Join-Path $plugins 'MHW-DLSS4'
+$dataDir = Join-Path $plugins 'MHW-FSR'
 $backupDir = Join-Path $PSScriptRoot '..\re\backup'
 
 if ($Remove) {
-    foreach ($p in @("$plugins\MHW-DLSS4.dll", "$plugins\MHW-DLSS4.pdb")) {
+    foreach ($p in @("$plugins\MHW-FSR.dll", "$plugins\MHW-FSR.pdb")) {
         if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; "removed $p" }
     }
-    # The ini, log and the DLSS folder are left in place on purpose; delete by hand if wanted.
+    if (Test-Path -LiteralPath $dataDir) { Remove-Item -LiteralPath $dataDir -Recurse -Force; "removed $dataDir" }
     return
 }
 
@@ -30,10 +27,32 @@ if ((Test-Path -LiteralPath $opt) -and -not (Test-Path -LiteralPath $optBackup))
 }
 
 $build = Join-Path $PSScriptRoot '..\build'
-Copy-Item -LiteralPath (Join-Path $build 'MHW-DLSS4.dll') $plugins -Force
-Copy-Item -LiteralPath (Join-Path $build 'MHW-DLSS4.pdb') $plugins -Force
-if ($Dlss) {
-    New-Item -ItemType Directory -Force $dataDir | Out-Null
-    Copy-Item -LiteralPath $Dlss (Join-Path $dataDir 'nvngx_dlss.dll') -Force
+$dll = if (Test-Path (Join-Path $build 'Release\MHW-FSR.dll')) { Join-Path $build 'Release\MHW-FSR.dll' } else { Join-Path $build 'MHW-FSR.dll' }
+$pdb = if (Test-Path (Join-Path $build 'Release\MHW-FSR.pdb')) { Join-Path $build 'Release\MHW-FSR.pdb' } else { Join-Path $build 'MHW-FSR.pdb' }
+Copy-Item -LiteralPath $dll $plugins -Force
+if (Test-Path $pdb) {
+    Copy-Item -LiteralPath $pdb $plugins -Force
 }
+
+# Deploy AMD FidelityFX runtime binaries into plugins\MHW-FSR
+$sdkBins = Join-Path $PSScriptRoot '..\..\FidelityFX-SDK\Kits\FidelityFX\signedbin'
+if (Test-Path $sdkBins) {
+    New-Item -ItemType Directory -Force $dataDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sdkBins 'amd_fidelityfx_loader_dx12.dll') $dataDir -Force
+    Copy-Item -LiteralPath (Join-Path $sdkBins 'amd_fidelityfx_upscaler_dx12.dll') $dataDir -Force
+}
+
+# Deploy initial MHW-FSR.ini if not present in plugins
+$iniDest = Join-Path $plugins 'MHW-FSR.ini'
+if (-not (Test-Path -LiteralPath $iniDest)) {
+    $text = Get-Content -Raw (Join-Path $PSScriptRoot '..\src\config.cpp')
+    $m = [regex]::Match($text, 'kDefaultIni\[\] =\s*((?:\s*L"(?:[^"\\]|\\.)*")+);')
+    if ($m.Success) {
+        $lines = [regex]::Matches($m.Groups[1].Value, 'L"((?:[^"\\]|\\.)*)"') | ForEach-Object {
+            [regex]::Replace($_.Groups[1].Value, '\\(.)', { param($e) if ($e.Groups[1].Value -ceq 'n') { "`n" } else { $e.Groups[1].Value } })
+        }
+        [IO.File]::WriteAllText($iniDest, ($lines -join ''), [Text.Encoding]::ASCII)
+    }
+}
+
 "installed into $plugins"

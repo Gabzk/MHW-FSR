@@ -12,7 +12,7 @@
 
 #include "log.h"
 
-namespace mhwdlss::probe {
+namespace mhwfsr::probe {
 
 namespace {
 
@@ -362,4 +362,4 @@ void RecordFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Res
     if (--g_dumpWanted == 0) g_dumpWait = kWaitFrames;
 }
 
-}  // namespace mhwdlss::probe
+}  // namespace mhwfsr::probe

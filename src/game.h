@@ -7,11 +7,11 @@
 struct ID3D12Resource;
 struct ID3D11Resource;
 
-namespace mhwdlss {
+namespace mhwfsr {
 struct Config;
 }
 
-namespace mhwdlss::game {
+namespace mhwfsr::game {
 
 // Layout of the game's DLSS context object (0x48 bytes), the one stored at
 // device + 0x42700 and created by the game's NGX init wrapper.
@@ -29,6 +29,9 @@ struct Jitter {
     float y = 0.0f;
     uint64_t frame = 0;
     bool cut = false;  // the camera jumped since the previous frame: DLSS history must not be used
+    float fovY = 0.785398f;
+    float cameraNear = 0.1f;
+    float cameraFar = 10000.0f;
 };
 
 // Finds the game globals and hooks the TAA filter. Safe to call under the loader lock. The hooks
@@ -127,4 +130,4 @@ void NoteDlssEvaluated();
 // Jitter and TAA counters since the previous call, for the log.
 std::string JitterStats();
 
-}  // namespace mhwdlss::game
+}  // namespace mhwfsr::game
