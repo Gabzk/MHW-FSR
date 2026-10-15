@@ -17,6 +17,7 @@
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_context.h"
+#include "framegen.h"
 #include "fsr_loader.h"
 #include "game.h"
 #include "log.h"
@@ -385,6 +386,27 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     dp.reset = (reset != 0);
 
     bool ok = f.fsr.Dispatch(dp);
+    if (ok) {
+        framegen::CaptureHudLess(cl, output);
+        framegen::FrameData fd{};
+        fd.depth = depth;
+        fd.motion = motion;
+        fd.jitterX = jx;
+        fd.jitterY = jy;
+        fd.mvScaleX = g_config.mvScaleX;
+        fd.mvScaleY = g_config.mvScaleY;
+        fd.renderW = rect.width;
+        fd.renderH = rect.height;
+        fd.displayW = outputInfo.width;
+        fd.displayH = outputInfo.height;
+        fd.cameraNear = dp.cameraNear;
+        fd.cameraFar = dp.cameraFar;
+        fd.fovY = dp.cameraFovAngleVertical;
+        fd.deltaMs = dp.frameTimeDeltaMs;
+        fd.reset = dp.reset;
+        fd.frameId = frame;
+        framegen::RecordFrameData(fd);
+    }
     LogEvaluation(f, ok, rect.width, rect.height, outputInfo.width, outputInfo.height, jx, jy, frame, reset);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }
@@ -472,6 +494,27 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
     dp.reset = (reset != 0);
 
     bool ok = f.fsr.Dispatch(dp);
+    if (ok) {
+        framegen::CaptureHudLess(cl, output);
+        framegen::FrameData fd{};
+        fd.depth = g_upscale.depth;
+        fd.motion = g_upscale.motion;
+        fd.jitterX = jx;
+        fd.jitterY = jy;
+        fd.mvScaleX = g_config.mvScaleX;
+        fd.mvScaleY = g_config.mvScaleY;
+        fd.renderW = inW;
+        fd.renderH = inH;
+        fd.displayW = outputInfo.width;
+        fd.displayH = outputInfo.height;
+        fd.cameraNear = dp.cameraNear;
+        fd.cameraFar = dp.cameraFar;
+        fd.fovY = dp.cameraFovAngleVertical;
+        fd.deltaMs = dp.frameTimeDeltaMs;
+        fd.reset = dp.reset;
+        fd.frameId = g_upscale.frame;
+        framegen::RecordFrameData(fd);
+    }
     LogEvaluation(f, ok, inW, inH, outputInfo.width, outputInfo.height, jx, jy, g_upscale.frame, reset);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }

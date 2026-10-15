@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "antilag.h"
+#include "framegen.h"
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_context.h"
@@ -228,6 +229,9 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     g_hwnd = desc.OutputWindow;
     g_bufferCount = desc.BufferCount;
 
+    framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+    framegen::SetEnabled(g_config.frameGen);
+
     // RTV Heap (reserve capacity for at least 8 backbuffers)
     g_rtvCapacity = std::max(g_bufferCount, kMinRtvDescriptors);
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
@@ -357,6 +361,12 @@ void RenderOsdBadge() {
             ImGui::TextDisabled("|");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.95f, 0.22f, 0.28f, 1.0f), "AL2");
+        }
+        if (framegen::IsActive()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "FG");
         }
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 0.8f), "[F10]");
@@ -512,9 +522,34 @@ void RenderMainWindow() {
                 ImGui::EndTabItem();
             }
 
-            // Tab 3: Frame Pacing & Anti-Lag 2
-            if (ImGui::BeginTabItem("Latency & Pacing")) {
+            // Tab 3: Frame Generation & Latency
+            if (ImGui::BeginTabItem("Frame Gen & Latency")) {
                 ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "AMD FIDELITYFX FRAME GENERATION");
+
+                bool fgSupported = framegen::IsSupported();
+                bool fgActive = framegen::IsActive();
+
+                if (fgSupported) {
+                    if (fgActive) {
+                        ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "Status: Active (FSR FG Runtime)");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "Status: Standby / Disabled");
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "Status: Unavailable");
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Checkbox("Enable Frame Generation (FSR FG)", &g_config.frameGen)) {
+                    framegen::SetEnabled(g_config.frameGen);
+                }
+                ImGui::TextDisabled("Generates interpolated frames using optical flow and clean HUDLess scene data to double FPS.");
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "AMD FIDELITYFX ANTI-LAG 2");
 
                 bool supported = antilag::IsSupported();
@@ -807,6 +842,7 @@ void OnPostResize(IDXGISwapChain3* swapChain) {
     }
 
     CreateRenderTargetViews(swapChain);
+    framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
 }
 
 bool IsVisible() {

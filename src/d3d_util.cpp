@@ -154,6 +154,38 @@ ID3D12Resource* Mirror12::Update(ID3D12GraphicsCommandList* cl, ID3D12Resource* 
     return texture_.Get();
 }
 
+ID3D12Resource* Mirror12::UpdateFromUav(ID3D12GraphicsCommandList* cl, ID3D12Resource* source) {
+    if (!source || !cl) return nullptr;
+    D3D12_RESOURCE_DESC desc = source->GetDesc();
+    if (texture_) {
+        D3D12_RESOURCE_DESC have = texture_->GetDesc();
+        if (have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format) Reset();
+    }
+    if (!texture_) {
+        ComPtr<ID3D12Device> device;
+        if (FAILED(source->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        desc.Alignment = 0;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                                     IID_PPV_ARGS(&texture_));
+        if (FAILED(hr)) {
+            LOGE("mirror texture {}x{} fmt {} could not be created ({:#x})", desc.Width, desc.Height,
+                 static_cast<int>(desc.Format), static_cast<unsigned>(hr));
+            return nullptr;
+        }
+    }
+    Transition(cl, source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE,
+               texture_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    cl->CopyResource(texture_.Get(), source);
+    Transition(cl, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    return texture_.Get();
+}
+
 ID3D11Resource* Mirror11::Update(ID3D11DeviceContext* ctx, ID3D11Resource* source) {
     ComPtr<ID3D11Texture2D> src;
     if (FAILED(source->QueryInterface(IID_PPV_ARGS(&src)))) return nullptr;

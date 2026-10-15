@@ -17,6 +17,7 @@ endif()
 
 set(FFX_API_INCLUDE "${FFX_SDK_DIR}/Kits/FidelityFX/api/include")
 set(FFX_UPSCALE_INCLUDE "${FFX_SDK_DIR}/Kits/FidelityFX/upscalers/include")
+set(FFX_FRAMEGEN_INCLUDE "${FFX_SDK_DIR}/Kits/FidelityFX/framegeneration/include")
 set(FFX_LIB_DIR "${FFX_SDK_DIR}/Kits/FidelityFX/signedbin")
 
 add_library(MHW-FSR SHARED
@@ -26,6 +27,7 @@ add_library(MHW-FSR SHARED
   src/d3d_util.cpp
   src/barrier_batcher.cpp
   src/antilag.cpp
+  src/framegen.cpp
   src/fsr_context.cpp
   src/fsr_loader.cpp
   src/game.cpp
@@ -50,6 +52,7 @@ target_include_directories(MHW-FSR PRIVATE
   src/overlay/imgui/backends
   "${FFX_API_INCLUDE}"
   "${FFX_UPSCALE_INCLUDE}"
+  "${FFX_FRAMEGEN_INCLUDE}"
 )
 
 target_compile_definitions(MHW-FSR PRIVATE

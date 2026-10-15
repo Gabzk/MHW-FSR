@@ -45,6 +45,8 @@ class Mirror12 {
 public:
     // Copies `source` (currently in NON_PIXEL_SHADER_RESOURCE) into the mirror.
     ID3D12Resource* Update(ID3D12GraphicsCommandList* cl, ID3D12Resource* source);
+    // Copies `source` (currently in UNORDERED_ACCESS) into the mirror.
+    ID3D12Resource* UpdateFromUav(ID3D12GraphicsCommandList* cl, ID3D12Resource* source);
     void Reset() { Retire(std::move(texture_)); }
 
 private:
