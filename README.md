@@ -19,6 +19,14 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 
 ---
 
+## Visual Comparison
+
+![FSR Visual Comparison](images/comparison.png)
+
+*Comparison demonstrating reconstructed details, texture clarity, and temporal anti-aliasing stability with AMD FidelityFX FSR in Monster Hunter: World.*
+
+---
+
 ## Requirements
 
 1. **Monster Hunter: World** (v15.23) running in **DirectX 12** mode.
