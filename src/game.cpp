@@ -987,6 +987,14 @@ uint64_t Frame() {
 
 void SetDlssUnavailable(bool unavailable) { g_dlssUnavailable = unavailable; }
 
+void ForceEnableDlssSupport() {
+    uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
+    if (renderer) {
+        auto* bits = reinterpret_cast<uint32_t*>(renderer + kRendererDlssBits);
+        *bits |= 3;  // DLSS (bit 0) | DLISP (bit 1)
+    }
+}
+
 uint8_t* Device() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
     if (!renderer) return nullptr;

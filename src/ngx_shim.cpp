@@ -638,36 +638,38 @@ using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 GetProcAddressFn g_realGetProcAddress = nullptr;
 
 FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
-    FARPROC real = g_realGetProcAddress(module, name);
-    if (!real || IS_INTRESOURCE(name) || std::strncmp(name, "NVSDK_NGX_D3D1", 14) != 0) return real;
-    static constexpr const char* kEntries[] = {"Init",          "Shutdown",        "GetScratchBufferSize",
-                                               "GetParameters", "CreateFeature",   "EvaluateFeature",
-                                               "ReleaseFeature"};
-    for (Api api : {Api::D3D11, Api::D3D12}) {
-        std::string prefix = std::string("NVSDK_NGX_") + ApiName(api) + "_";
-        if (std::strncmp(name, prefix.c_str(), prefix.size()) != 0) continue;
-        const void* const* shim = reinterpret_cast<const void* const*>(&State(api).shim);
-        for (int i = 0; i < 7; ++i) {
-            if (std::strcmp(name + prefix.size(), kEntries[i]) != 0) continue;
-            if (i == 0) LOGD("game initialises NGX {} through the plugin's entries", ApiName(api));
-            return reinterpret_cast<FARPROC>(const_cast<void*>(shim[i]));
+    if (!IS_INTRESOURCE(name) && std::strncmp(name, "NVSDK_NGX_D3D1", 14) == 0) {
+        static constexpr const char* kEntries[] = {"Init",          "Shutdown",        "GetScratchBufferSize",
+                                                   "GetParameters", "CreateFeature",   "EvaluateFeature",
+                                                   "ReleaseFeature"};
+        for (Api api : {Api::D3D11, Api::D3D12}) {
+            std::string prefix = std::string("NVSDK_NGX_") + ApiName(api) + "_";
+            if (std::strncmp(name, prefix.c_str(), prefix.size()) != 0) continue;
+            const void* const* shim = reinterpret_cast<const void* const*>(&State(api).shim);
+            for (int i = 0; i < 7; ++i) {
+                if (std::strcmp(name + prefix.size(), kEntries[i]) != 0) continue;
+                if (i == 0) LOGI("Game initialised NGX {} through shim entries", ApiName(api));
+                return reinterpret_cast<FARPROC>(const_cast<void*>(shim[i]));
+            }
         }
     }
-    return real;
+    return g_realGetProcAddress ? g_realGetProcAddress(module, name) : GetProcAddress(module, name);
 }
 
 void** FindGetProcAddressSlot(HMODULE exe) {
     void* real[3] = {reinterpret_cast<void*>(&GetProcAddress), nullptr, nullptr};
     if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll")) real[1] = reinterpret_cast<void*>(GetProcAddress(k32, "GetProcAddress"));
     if (HMODULE kb = GetModuleHandleW(L"kernelbase.dll")) real[2] = reinterpret_cast<void*>(GetProcAddress(kb, "GetProcAddress"));
+    auto rdata = mem::FindSection(exe, ".rdata");
     for (const char* exportName : {"NVSDK_NGX_D3D12_Init", "NVSDK_NGX_D3D11_Init"}) {
         auto* code = reinterpret_cast<uint8_t*>(GetProcAddress(exe, exportName));
         if (!code) continue;
         for (int i = 0; i < 0x200; ++i) {
             if (code[i] != 0xff || code[i + 1] != 0x15) continue;
             auto** slot = reinterpret_cast<void**>(mem::RipTarget(code + i + 2, code + i + 6));
+            if (rdata && (reinterpret_cast<uint8_t*>(slot) < rdata->begin || reinterpret_cast<uint8_t*>(slot) >= rdata->end)) continue;
             void* value = mem::SafeRead<void*>(slot).value_or(nullptr);
-            if (value && (value == real[0] || value == real[1] || value == real[2])) return slot;
+            if (value && (value == real[0] || value == real[1] || value == real[2] || rdata)) return slot;
         }
     }
     return nullptr;
@@ -687,6 +689,7 @@ void HookNgxLookups(HMODULE exe) {
 void AdoptContext(bool /*mayUseDxgi*/) {
     game::DlssContext* ctx = game::Context();
     if (ctx) {
+        game::ForceEnableDlssSupport();
         if (ctx->params == &g_params) return;
         auto* lock = reinterpret_cast<CRITICAL_SECTION*>(ctx->lock);
         EnterCriticalSection(lock);
@@ -723,8 +726,20 @@ void AdoptContext(bool /*mayUseDxgi*/) {
     InitializeCriticalSection(reinterpret_cast<CRITICAL_SECTION*>(mem->lock));
     mem->params = &g_params;
     game::SetContext(mem);
+    game::ForceEnableDlssSupport();
     g_contextCreated = true;
-    LOGI("Created game DLSS context for MHW-FSR");
+    LOGI("Created game DLSS context and enabled feature bits for MHW-FSR");
+}
+
+void OnFrameStart() {
+    std::lock_guard lock(g_mutex);
+    PatchTable(g_api[0], Api::D3D11, false);
+    PatchTable(g_api[1], Api::D3D12, false);
+    if (!g_contextCreated) {
+        AdoptContext(false);
+    } else {
+        game::ForceEnableDlssSupport();
+    }
 }
 
 void OnFrame() {
@@ -813,6 +828,7 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
 
     AdoptContext(false);
     if (!game::Device()) HookNgxLookups(exe);
+    game::SetFrameStartCallback(&OnFrameStart);
     game::SetFrameCallback(&OnFrame);
     game::SetUpdateCallback(&OnUpdate);
     LOGD("Renderer at MHW-FSR install: {}", game::DescribeState());
