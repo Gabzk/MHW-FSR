@@ -1,3 +1,5 @@
+![MHW-FSR: AMD FidelityFX FSR 3.1 & 4.1 for Monster Hunter: World](images/banner_fsr.jpg)
+
 # MHW-FSR: AMD FidelityFX FSR 3.1 & 4.1 for Monster Hunter: World
 
 **MHW-FSR** is an open-source DirectX 12 plugin for [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982) that brings native **AMD FidelityFX FSR 3.1** and next-gen **FSR 4.1** (ML upscaler) to *Monster Hunter: World* (v15.23).
