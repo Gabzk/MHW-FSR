@@ -86,8 +86,10 @@ void STDMETHODCALLTYPE HookExecuteCommandLists(ID3D12CommandQueue* queue, UINT n
             }
         }
     }
-    g_realExecuteCommandLists(queue, numCommandLists, ppCommandLists);
-    if (queue == g_gameCommandQueue.load(std::memory_order_relaxed)) {
+    if (g_realExecuteCommandLists) {
+        g_realExecuteCommandLists(queue, numCommandLists, ppCommandLists);
+    }
+    if (queue == g_gameCommandQueue.load(std::memory_order_relaxed) && game::Frame() > 0 && antilag::IsActive()) {
         antilag::MarkEndOfFrameRendering();
     }
 }
@@ -229,8 +231,10 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     g_hwnd = desc.OutputWindow;
     g_bufferCount = desc.BufferCount;
 
-    framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
-    framegen::SetEnabled(g_config.frameGen);
+    if (g_config.frameGen) {
+        framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+        framegen::SetEnabled(true);
+    }
 
     // RTV Heap (reserve capacity for at least 8 backbuffers)
     g_rtvCapacity = std::max(g_bufferCount, kMinRtvDescriptors);
@@ -542,6 +546,10 @@ void RenderMainWindow() {
 
                 ImGui::Spacing();
                 if (ImGui::Checkbox("Enable Frame Generation (FSR FG)", &g_config.frameGen)) {
+                    if (g_config.frameGen && g_device && !g_renderTargets.empty()) {
+                        D3D12_RESOURCE_DESC rtDesc = g_renderTargets[0]->GetDesc();
+                        framegen::Init(g_device.Get(), static_cast<uint32_t>(rtDesc.Width), rtDesc.Height, rtDesc.Format);
+                    }
                     framegen::SetEnabled(g_config.frameGen);
                 }
                 ImGui::TextDisabled("Generates interpolated frames using optical flow and clean HUDLess scene data to double FPS.");
@@ -658,7 +666,9 @@ void WaitForGpu() {
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags) {
     if ((flags & DXGI_PRESENT_TEST) == 0) {
-        antilag::SetFrameGenFrameType(false);
+        if (antilag::IsActive() && framegen::IsActive()) {
+            antilag::SetFrameGenFrameType(false);
+        }
         OnPresent(swapChain);
     }
     return g_realPresent(swapChain, syncInterval, flags);
@@ -666,7 +676,9 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInter
 
 HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain3* swapChain, UINT syncInterval, UINT presentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
     if ((presentFlags & DXGI_PRESENT_TEST) == 0) {
-        antilag::SetFrameGenFrameType(false);
+        if (antilag::IsActive() && framegen::IsActive()) {
+            antilag::SetFrameGenFrameType(false);
+        }
         OnPresent(swapChain);
     }
     return g_realPresent1(swapChain, syncInterval, presentFlags, pPresentParameters);
@@ -842,7 +854,9 @@ void OnPostResize(IDXGISwapChain3* swapChain) {
     }
 
     CreateRenderTargetViews(swapChain);
-    framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+    if (g_config.frameGen) {
+        framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+    }
 }
 
 bool IsVisible() {

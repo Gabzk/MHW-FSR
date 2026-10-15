@@ -69,9 +69,11 @@ void Start(HMODULE module) {
         return;
     }
 
-    // Connect Anti-Lag 2 update to game frame start (before input sampling)
-    game::SetFrameStartCallback([]() {
-        antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+    // Connect Anti-Lag 2 update to game input polling (before input sampling)
+    game::SetInputCallback([]() {
+        if (g_config.antiLag2) {
+            antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+        }
     });
 
     if (!ngx::Install(dataDir.wstring(), exe.parent_path().wstring())) {

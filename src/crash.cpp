@@ -31,7 +31,8 @@ std::string Describe(DWORD64 address) {
 LONG CALLBACK Handler(EXCEPTION_POINTERS* info) {
     const EXCEPTION_RECORD* rec = info->ExceptionRecord;
     if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION && rec->ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION &&
-        rec->ExceptionCode != EXCEPTION_STACK_OVERFLOW)
+        rec->ExceptionCode != EXCEPTION_STACK_OVERFLOW && rec->ExceptionCode != 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN */ &&
+        rec->ExceptionCode != 0xC0000374 /* STATUS_HEAP_CORRUPTION */)
         return EXCEPTION_CONTINUE_SEARCH;
     const CONTEXT* c = info->ContextRecord;
     // Faults inside the plugin come from SafeRead and are handled there.
@@ -74,6 +75,6 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* info) {
 
 }  // namespace
 
-void InstallCrashLogger() { AddVectoredExceptionHandler(0, &Handler); }
+void InstallCrashLogger() { AddVectoredExceptionHandler(1, &Handler); }
 
 }  // namespace mhwfsr

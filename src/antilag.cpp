@@ -62,7 +62,12 @@ void Update(bool enabled, uint32_t maxFps) {
     }
 
     HRESULT hr = AMD::AntiLag2DX12::Update(&g_context, enabled, maxFps);
-    g_active.store(enabled && SUCCEEDED(hr));
+    bool active = enabled && SUCCEEDED(hr);
+    if (active != g_active.load()) {
+        LOGI("AMD FidelityFX Anti-Lag 2: status changed to {} (enabled={}, maxFps={})",
+             active ? "ACTIVE" : "INACTIVE", enabled, maxFps);
+    }
+    g_active.store(active);
 }
 
 void MarkEndOfFrameRendering() {
