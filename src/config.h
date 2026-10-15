@@ -29,6 +29,10 @@ struct Config {
     // Sharpening after FSR, 0..1; negative = the game's DLSS Sharpness option.
     float sharpness = 0.33f;
 
+    // AMD FidelityFX Anti-Lag 2
+    bool antiLag2 = true;
+    int antiLagMaxFps = 0;  // 0 = unlimited
+
     // Input conventions, measured for this game (see game.cpp).
     bool depthInverted = true;
     bool depthInfinite = false;

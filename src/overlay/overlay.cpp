@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "antilag.h"
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_context.h"
@@ -85,6 +86,9 @@ void STDMETHODCALLTYPE HookExecuteCommandLists(ID3D12CommandQueue* queue, UINT n
         }
     }
     g_realExecuteCommandLists(queue, numCommandLists, ppCommandLists);
+    if (queue == g_gameCommandQueue.load(std::memory_order_relaxed)) {
+        antilag::MarkEndOfFrameRendering();
+    }
 }
 
 void ApplyTheme() {
@@ -217,6 +221,7 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
         LOGE("overlay: cannot query ID3D12Device from swapchain");
         return false;
     }
+    antilag::Init(g_device.Get());
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
@@ -347,6 +352,12 @@ void RenderOsdBadge() {
         ImGui::TextDisabled("|");
         ImGui::SameLine();
         ImGui::Text("%.0f FPS", ImGui::GetIO().Framerate);
+        if (antilag::IsActive()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.22f, 0.28f, 1.0f), "AL2");
+        }
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 0.8f), "[F10]");
     }
@@ -501,7 +512,44 @@ void RenderMainWindow() {
                 ImGui::EndTabItem();
             }
 
-            // Tab 3: Diagnostics & Comparison
+            // Tab 3: Frame Pacing & Anti-Lag 2
+            if (ImGui::BeginTabItem("Latency & Pacing")) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "AMD FIDELITYFX ANTI-LAG 2");
+
+                bool supported = antilag::IsSupported();
+                bool active = antilag::IsActive();
+
+                if (supported) {
+                    if (active) {
+                        ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "Driver Status: Active (amdxc64.dll)");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "Driver Status: Ready (Disabled)");
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "Driver Status: Unavailable (Requires AMD Radeon GPU)");
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Checkbox("Enable Anti-Lag 2", &g_config.antiLag2)) {
+                    antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+                }
+                ImGui::TextDisabled("Synchronizes CPU input delivery with GPU presentation to eliminate input latency.");
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "DRIVER FRAME PACING");
+                if (ImGui::SliderInt("Driver Max FPS", &g_config.antiLagMaxFps, 0, 240, g_config.antiLagMaxFps == 0 ? "Unlimited" : "%d FPS")) {
+                    antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+                }
+                ImGui::TextDisabled("Driver-level frame rate limiter. Ensures stable frame pacing without queue bloat.");
+
+                ImGui::EndTabItem();
+            }
+
+            // Tab 4: Diagnostics & Comparison
             if (ImGui::BeginTabItem("Diagnostics")) {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "VISUAL COMPARISON");
@@ -575,6 +623,7 @@ void WaitForGpu() {
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags) {
     if ((flags & DXGI_PRESENT_TEST) == 0) {
+        antilag::SetFrameGenFrameType(false);
         OnPresent(swapChain);
     }
     return g_realPresent(swapChain, syncInterval, flags);
@@ -582,6 +631,7 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInter
 
 HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain3* swapChain, UINT syncInterval, UINT presentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
     if ((presentFlags & DXGI_PRESENT_TEST) == 0) {
+        antilag::SetFrameGenFrameType(false);
         OnPresent(swapChain);
     }
     return g_realPresent1(swapChain, syncInterval, presentFlags, pPresentParameters);
@@ -614,6 +664,7 @@ void TryInstall() {
 
     // Query D3D12 device from swapchain
     if (SUCCEEDED(swapChain->GetDevice(IID_PPV_ARGS(&g_device)))) {
+        antilag::Init(g_device.Get());
         // Create a temporary DIRECT queue to obtain the virtual table of ID3D12CommandQueue
         D3D12_COMMAND_QUEUE_DESC qDesc = {};
         qDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;

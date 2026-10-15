@@ -25,6 +25,7 @@ add_library(MHW-FSR SHARED
   src/crash.cpp
   src/d3d_util.cpp
   src/barrier_batcher.cpp
+  src/antilag.cpp
   src/fsr_context.cpp
   src/fsr_loader.cpp
   src/game.cpp

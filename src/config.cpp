@@ -84,7 +84,17 @@ constexpr wchar_t kDefaultIni[] =
     L"; Bypass: Comparison mode (only active when QualityPreset=NativeAA).\n"
     L";   0 = FSR active.\n"
     L";   1 = Displays vanilla MT Framework TAA to compare sharpness side by side.\n"
-    L"Bypass=0\n";
+    L"Bypass=0\n"
+    L"\n"
+    L"[AntiLag]\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; AntiLag2: AMD FidelityFX Anti-Lag 2 driver-level latency reduction (Radeon).\n"
+    L";   1 = Enabled (synchronizes CPU and GPU pacing, reducing click-to-photon latency).\n"
+    L";   0 = Disabled.\n"
+    L"AntiLag2=1\n"
+    L"\n"
+    L"; AntiLagMaxFPS: Framerate limiter via driver pacing (0 = Unlimited).\n"
+    L"AntiLagMaxFPS=0\n";
 
 std::wstring g_iniPath;
 unsigned long long g_iniTime = 0;
@@ -234,6 +244,10 @@ void LoadConfig(const std::wstring& ini) {
     c.dllPath = ReadString(ini, L"FSR", L"DLLPath", L"");
     c.bypass = ReadBool(ini, L"FSR", L"Bypass", c.bypass);
 
+    // [AntiLag]
+    c.antiLag2 = ReadBool(ini, L"AntiLag", L"AntiLag2", c.antiLag2);
+    c.antiLagMaxFps = std::max(0, static_cast<int>(ReadFloat(ini, L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps))));
+
     // [Advanced]
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
     c.depthInfinite = ReadBool(ini, L"Advanced", L"DepthInfinite", c.depthInfinite);
@@ -312,6 +326,8 @@ void SaveConfig(const Config& c) {
     writeBool(L"FSR", L"AutoExposure", c.autoExposure);
     writeStr(L"FSR", L"Version", Widen(c.version));
     writeBool(L"FSR", L"Bypass", c.bypass);
+    writeBool(L"AntiLag", L"AntiLag2", c.antiLag2);
+    writeFloat(L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps));
     g_iniTime = LastWrite(g_iniPath);
 }
 

@@ -2,6 +2,7 @@
 
 #include <filesystem>
 
+#include "antilag.h"
 #include "config.h"
 #include "crash.h"
 #include "fsr_loader.h"
@@ -67,6 +68,12 @@ void Start(HMODULE module) {
         LOGE("Game hooks failed, plugin inactive");
         return;
     }
+
+    // Connect Anti-Lag 2 update to game frame start (before input sampling)
+    game::SetFrameStartCallback([]() {
+        antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+    });
+
     if (!ngx::Install(dataDir.wstring(), exe.parent_path().wstring())) {
         LOGE("Engine hooks failed, plugin inactive");
         return;
@@ -89,6 +96,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         } catch (...) {
             LOGE("Startup failed with unknown exception");
         }
+    } else if (reason == DLL_PROCESS_DETACH) {
+        antilag::Shutdown();
     }
     return TRUE;
 }
