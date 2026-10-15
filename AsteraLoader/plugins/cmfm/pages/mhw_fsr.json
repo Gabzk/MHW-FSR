@@ -1,0 +1,107 @@
+{
+  "cmfm": 1,
+  "mod": "MHW-FSR",
+  "version": "1.1.0",
+  "source": "author",
+  "made_by": "Gabzk",
+  "config": {
+    "file": "nativePC/plugins/MHW-FSR.ini",
+    "expect": ["FSR.QualityPreset"]
+  },
+  "applies": "live",
+  "pages": [
+    {
+      "title": "MHW-FSR",
+      "settings": [
+        { "section": "General" },
+        {
+          "label": "Enable Plugin",
+          "type": "bool",
+          "path": "General.Enabled",
+          "default": true,
+          "help": "Enable or disable FSR upscaling completely."
+        },
+        { "section": "FSR Settings" },
+        {
+          "id": "preset",
+          "label": "Quality Preset",
+          "type": "choice",
+          "path": "FSR.QualityPreset",
+          "choices": {
+            "NativeAA": "NativeAA (100% Native + FSR)",
+            "Quality": "Quality (~1.5x Scaling)",
+            "Balanced": "Balanced (~1.7x Scaling)",
+            "Performance": "Performance (~2.0x Scaling)",
+            "UltraPerformance": "Ultra Performance (~3.0x)",
+            "Custom": "Custom Render Scale"
+          },
+          "default": "Quality",
+          "help": "Resolution scaling mode. NativeAA runs at native resolution with FSR anti-aliasing."
+        },
+        {
+          "label": "Custom Scale",
+          "type": "float",
+          "path": "FSR.RenderScale",
+          "min": 0.50,
+          "max": 1.00,
+          "step": 0.01,
+          "decimals": 2,
+          "default": 1.00,
+          "hide_unless": { "preset": "Custom" },
+          "help": "Custom scale ratio (0.50 to 1.00) used when Quality Preset is set to Custom."
+        },
+        {
+          "label": "Upscaler Version",
+          "type": "choice",
+          "path": "FSR.Version",
+          "choices": {
+            "Auto": "Auto (Optimal for GPU)",
+            "FSR 4": "Force FSR 4 (DirectML)",
+            "FSR 3.1": "Force FSR 3.1 (Temporal)"
+          },
+          "default": "Auto",
+          "help": "Auto selects FSR 4 ML on RDNA 3/4 (RX 7000 series), or FSR 3.1 on earlier architectures."
+        },
+        {
+          "label": "RCAS Sharpness",
+          "type": "float",
+          "path": "FSR.Sharpness",
+          "min": 0.00,
+          "max": 1.00,
+          "step": 0.05,
+          "decimals": 2,
+          "default": 0.33,
+          "help": "Robust Contrast-Adaptive Sharpening strength (0.0 to 1.0)."
+        },
+        {
+          "label": "Auto Exposure",
+          "type": "bool",
+          "path": "FSR.AutoExposure",
+          "default": false,
+          "help": "Let FSR estimate exposure luminance dynamically."
+        },
+        {
+          "label": "Bypass (Vanilla TAA)",
+          "type": "bool",
+          "path": "FSR.Bypass",
+          "default": false,
+          "help": "NativeAA mode only: bypasses FSR to display vanilla game TAA for comparison."
+        },
+        { "section": "Diagnostics" },
+        {
+          "label": "Log Level",
+          "type": "choice",
+          "path": "General.LogLevel",
+          "choices": {
+            "Info": "Info (Normal)",
+            "Debug": "Debug (Detailed)",
+            "Warn": "Warn (Warnings only)",
+            "Error": "Error (Errors only)"
+          },
+          "default": "Info",
+          "help": "Logging verbosity written to nativePC/plugins/MHW-FSR.log."
+        }
+      ]
+    }
+  ]
+}

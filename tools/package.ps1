@@ -44,6 +44,13 @@ if ($m.Success) {
     [IO.File]::WriteAllText((Join-Path $plugins 'MHW-FSR.ini'), ($lines -join ''), [Text.Encoding]::ASCII)
 }
 
+# Copy CMFM in-game settings page descriptor (for Astera Loader / CMFM users)
+$cmfmJson = Join-Path $root 'AsteraLoader\plugins\cmfm\pages\mhw_fsr.json'
+if (Test-Path $cmfmJson) {
+    $cmfmStage = New-Item -ItemType Directory -Force (Join-Path $stage 'AsteraLoader\plugins\cmfm\pages')
+    Copy-Item $cmfmJson $cmfmStage -Force
+}
+
 New-Item -ItemType Directory -Force (Split-Path $zip) | Out-Null
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

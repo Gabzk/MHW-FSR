@@ -15,6 +15,7 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 - **NativeAA (Native Resolution Anti-Aliasing)**: Replaces MT Framework's blurry legacy TAA with crisp FSR temporal anti-aliasing at 100% native resolution.
 - **Quality Presets**: NativeAA, Quality (~1.5x scaling), Balanced (~1.7x), Performance (~2.0x), and Custom scaling.
 - **Built-in RCAS Sharpening**: FidelityFX Robust Contrast-Adaptive Sharpening integrated directly into the dispatch pass.
+- **In-Game Menu Support (CMFM)**: Seamlessly configure presets, sliders, and options directly inside the game's native UI using [CMFM](https://www.nexusmods.com/monsterhunterworld/mods/8856), with full controller, mouse, and keyboard support.
 - **Zero NVIDIA Bloat**: 100% clean implementation without NVNGX SDK headers or static libraries.
 
 ---
@@ -30,8 +31,9 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 ## Requirements
 
 1. **Monster Hunter: World** (v15.23) running in **DirectX 12** mode.
-2. [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982) (or any loader supporting `nativePC\plugins\`).
+2. [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982) or [Astera Loader](https://www.nexusmods.com/monsterhunterworld/mods/7212) (supporting `nativePC\plugins\`).
 3. Windows 10/11 64-bit with current graphics drivers.
+4. *(Optional)* [CMFM (Configuration Menu For Mods)](https://www.nexusmods.com/monsterhunterworld/mods/8856) to configure the mod inside the game's pause menu.
 
 ---
 
@@ -43,6 +45,7 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
    nativePC\plugins\MHW-FSR.ini
    nativePC\plugins\MHW-FSR\amd_fidelityfx_loader_dx12.dll
    nativePC\plugins\MHW-FSR\amd_fidelityfx_upscaler_dx12.dll
+   AsteraLoader\plugins\cmfm\pages\mhw_fsr.json   (optional, for CMFM in-game menu)
    ```
    > **Note:** The FSR runtime binaries must stay inside `nativePC\plugins\MHW-FSR\`. Do not place them directly in `plugins\`, as Stracker's Loader will attempt to treat them as game mods.
 
@@ -88,6 +91,15 @@ Bypass=0
 
 ---
 
+## In-Game Configuration Menu (Optional - CMFM)
+
+If you have [CMFM (Configuration Menu For Mods)](https://www.nexusmods.com/monsterhunterworld/mods/8856) and [Astera Loader](https://www.nexusmods.com/monsterhunterworld/mods/7212) installed:
+- Simply extract the release archive into your game directory as normal. The CMFM description file (`AsteraLoader\plugins\cmfm\pages\mhw_fsr.json`) is included out of the box.
+- Open the in-game pause menu (**Start -> System -> Mods -> MHW-FSR**) or the Title Screen menu (**Mods -> MHW-FSR**).
+- You can switch Quality Presets on the fly, adjust the RCAS sharpness slider, toggle auto-exposure, and select upscaler versions live with full gamepad, mouse, and keyboard navigation.
+
+---
+
 ## Logging & Diagnostics
 
 Detailed logs are written to:
@@ -125,8 +137,9 @@ To automatically package or deploy into your game installation:
 
 ## Credits & Acknowledgments
 
-- **[MHW-DLSS4](https://github.com/odt1/MHW-DLSS4)** by **odt1**: This project is a direct fork and evolution of `MHW-DLSS4`. All original engine reverse-engineering, MT Framework TAA pass hooking, projection matrix analysis, and memory scanning techniques are credited to **odt1**.
-- **[Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982)**: The plugin loader enabling native PC modding for *Monster Hunter: World*.
+- **[odt1](https://github.com/odt1/MHW-DLSS4)** for **MHW-DLSS4**: This project is a direct fork and evolution of `MHW-DLSS4`. All original engine reverse-engineering, MT Framework TAA pass hooking, projection matrix analysis, and memory scanning techniques are credited to **odt1**.
+- **[Stracker](https://www.nexusmods.com/monsterhunterworld/mods/1982)** for Stracker's Loader.
+- **[wowo-dot](https://github.com/wowo-dot)** for [CMFM](https://www.nexusmods.com/monsterhunterworld/mods/8856) and [Astera Loader](https://github.com/wowo-dot/AsteraLoader).
 - **[AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)**: AMD's open-source graphics technologies (FSR 3.1, FSR 4, and RCAS).
 
 ---

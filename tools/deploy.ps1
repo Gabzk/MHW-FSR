@@ -15,6 +15,8 @@ if ($Remove) {
         if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; "removed $p" }
     }
     if (Test-Path -LiteralPath $dataDir) { Remove-Item -LiteralPath $dataDir -Recurse -Force; "removed $dataDir" }
+    $cmfmFile = Join-Path $GameDir 'AsteraLoader\plugins\cmfm\pages\mhw_fsr.json'
+    if (Test-Path -LiteralPath $cmfmFile) { Remove-Item -LiteralPath $cmfmFile -Force; "removed $cmfmFile" }
     return
 }
 
@@ -52,6 +54,16 @@ if (-not (Test-Path -LiteralPath $iniDest)) {
             [regex]::Replace($_.Groups[1].Value, '\\(.)', { param($e) if ($e.Groups[1].Value -ceq 'n') { "`n" } else { $e.Groups[1].Value } })
         }
         [IO.File]::WriteAllText($iniDest, ($lines -join ''), [Text.Encoding]::ASCII)
+    }
+}
+
+# Deploy CMFM page descriptor if AsteraLoader/cmfm is present
+$cmfmPagesDir = Join-Path $GameDir 'AsteraLoader\plugins\cmfm\pages'
+if (Test-Path -LiteralPath $cmfmPagesDir) {
+    $cmfmSrc = Join-Path $PSScriptRoot '..\AsteraLoader\plugins\cmfm\pages\mhw_fsr.json'
+    if (Test-Path -LiteralPath $cmfmSrc) {
+        Copy-Item -LiteralPath $cmfmSrc $cmfmPagesDir -Force
+        "installed CMFM page into $cmfmPagesDir"
     }
 }
 
