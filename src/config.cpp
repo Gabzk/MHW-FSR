@@ -158,6 +158,15 @@ std::string Narrow(const std::wstring& ws) {
     return s;
 }
 
+std::wstring Widen(std::string_view s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring ws(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), ws.data(), len);
+    return ws;
+}
+
 }  // namespace
 
 float Config::RenderScale() const {
@@ -282,5 +291,28 @@ bool ReloadGameOptionsIfChanged() {
 float GameSharpness() { return g_gameSharpness; }
 
 int GameFrameRate() { return g_gameFrameRate; }
+
+void SaveConfig(const Config& c) {
+    if (g_iniPath.empty()) return;
+    auto writeStr = [&](const wchar_t* sec, const wchar_t* key, const std::wstring& val) {
+        WritePrivateProfileStringW(sec, key, val.c_str(), g_iniPath.c_str());
+    };
+    auto writeBool = [&](const wchar_t* sec, const wchar_t* key, bool val) {
+        writeStr(sec, key, val ? L"1" : L"0");
+    };
+    auto writeFloat = [&](const wchar_t* sec, const wchar_t* key, float val) {
+        wchar_t buf[32];
+        swprintf_s(buf, L"%.2f", val);
+        writeStr(sec, key, buf);
+    };
+
+    writeStr(L"FSR", L"QualityPreset", Widen(QualityModeName(c.mode)));
+    writeFloat(L"FSR", L"RenderScale", c.customScale);
+    writeFloat(L"FSR", L"Sharpness", c.sharpness);
+    writeBool(L"FSR", L"AutoExposure", c.autoExposure);
+    writeStr(L"FSR", L"Version", Widen(c.version));
+    writeBool(L"FSR", L"Bypass", c.bypass);
+    g_iniTime = LastWrite(g_iniPath);
+}
 
 }  // namespace mhwfsr

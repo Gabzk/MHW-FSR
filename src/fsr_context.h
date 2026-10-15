@@ -3,12 +3,17 @@
 #include <d3d12.h>
 #include <cstdint>
 #include <algorithm>
+#include <string>
 
 #include <ffx_api.hpp>
 #include <ffx_upscale.hpp>
 #include <dx12/ffx_api_dx12.hpp>
 
 namespace mhwfsr {
+
+// Returns the active FSR version name (e.g. "FSR 4.1.1" or "FSR 3.1.5")
+std::string ActiveFsrVersion();
+void SetActiveFsrVersion(const std::string& version);
 
 class FsrContext {
 public:

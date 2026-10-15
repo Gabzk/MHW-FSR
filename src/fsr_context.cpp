@@ -1,12 +1,18 @@
 #include "fsr_context.h"
 #include "d3d_util.h"
+#include "fsr_loader.h"
 #include "log.h"
 
+#include <mutex>
+#include <string>
 #include <string_view>
 
 namespace mhwfsr {
 
 namespace {
+
+std::mutex g_versionMutex;
+std::string g_activeFsrVersion = "Auto";
 
 void FsrMessageCallback(uint32_t type, const wchar_t* message) {
     if (!message) return;
@@ -96,6 +102,11 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
         ffx::CreateContextDescOverrideVersion overrideDesc{};
         overrideDesc.versionId = settings.versionId;
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc, overrideDesc);
+        if (!rc) {
+            LOGW("FSR CreateContext with override {:#x} failed (code {:#x}), falling back to default provider",
+                 settings.versionId, static_cast<uint32_t>(rc));
+            rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
+        }
     } else {
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
     }
@@ -109,10 +120,46 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
 
     m_ready = true;
     m_failed = false;
-    LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x}, version {:#x}",
+
+    // Query the exact active provider version from the context
+    ffxQueryGetProviderVersion pvDesc{};
+    pvDesc.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+    std::string activeVer;
+    if (ffxQuery(&m_context, &pvDesc.header) == FFX_API_RETURN_OK && pvDesc.versionName && pvDesc.versionName[0] != '\0') {
+        activeVer = pvDesc.versionName;
+    } else {
+        auto versions = loader::QueryVersions(device);
+        for (const auto& v : versions) {
+            if (settings.versionId != 0 && v.id == settings.versionId) {
+                activeVer = v.name;
+                break;
+            }
+        }
+        if (activeVer.empty() && !versions.empty()) {
+            activeVer = versions[0].name;
+        }
+    }
+    if (!activeVer.empty()) {
+        if (activeVer.find("FSR") == std::string::npos && activeVer.find("fsr") == std::string::npos) {
+            activeVer = "FSR " + activeVer;
+        }
+        SetActiveFsrVersion(activeVer);
+    }
+
+    LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x}, version {:#x} ({})",
          settings.renderW, settings.renderH, settings.upscaleW, settings.upscaleH,
-         settings.flags, settings.versionId);
+         settings.flags, settings.versionId, ActiveFsrVersion());
     return true;
+}
+
+std::string ActiveFsrVersion() {
+    std::lock_guard lock(g_versionMutex);
+    return g_activeFsrVersion;
+}
+
+void SetActiveFsrVersion(const std::string& version) {
+    std::lock_guard lock(g_versionMutex);
+    g_activeFsrVersion = version;
 }
 
 bool FsrContext::Dispatch(const DispatchParams& params) {

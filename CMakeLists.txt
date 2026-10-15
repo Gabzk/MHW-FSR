@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MHW-FSR VERSION 1.0.0 LANGUAGES CXX)
+project(MHW-FSR VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,10 +32,20 @@ add_library(MHW-FSR SHARED
   src/ngx_params.cpp
   src/ngx_shim.cpp
   src/probe.cpp
+  src/overlay/overlay.cpp
+  src/overlay/imgui/imgui.cpp
+  src/overlay/imgui/imgui_draw.cpp
+  src/overlay/imgui/imgui_tables.cpp
+  src/overlay/imgui/imgui_widgets.cpp
+  src/overlay/imgui/backends/imgui_impl_dx12.cpp
+  src/overlay/imgui/backends/imgui_impl_win32.cpp
 )
 
 target_include_directories(MHW-FSR PRIVATE
   src
+  src/overlay
+  src/overlay/imgui
+  src/overlay/imgui/backends
   "${FFX_API_INCLUDE}"
   "${FFX_UPSCALE_INCLUDE}"
 )

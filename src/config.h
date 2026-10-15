@@ -79,4 +79,7 @@ int GameFrameRate();
 
 const char* QualityModeName(QualityMode mode);
 
+// Writes current config values back to MHW-FSR.ini
+void SaveConfig(const Config& c);
+
 }  // namespace mhwfsr

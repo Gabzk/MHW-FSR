@@ -83,15 +83,20 @@ std::vector<FsrVersionInfo> QueryVersions(ID3D12Device* device) {
     return g_cachedVersions;
 }
 
+bool HasFsr4Support(ID3D12Device* device) {
+    if (!device) return false;
+    auto versions = QueryVersions(device);
+    for (const auto& v : versions) {
+        if (v.name.find("4") != std::string::npos) return true;
+    }
+    return false;
+}
+
 uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
     if (!device) return 0;
     auto versions = QueryVersions(device);
 
     if (versionStr.empty()) return 0;
-
-    std::string s = versionStr;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)::tolower(c); });
-    if (s == "auto" || s == "default") return 0;
 
     if (versions.empty()) return 0;
 
@@ -108,14 +113,6 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
         }
     };
 
-    if (s.rfind("0x", 0) == 0) {
-        try {
-            uint64_t id = std::stoull(s, nullptr, 16);
-            LogOverride("Custom ID", id);
-            return id;
-        } catch (...) {}
-    }
-
     auto normalize = [](std::string str) {
         std::string out;
         for (char c : str) {
@@ -125,6 +122,27 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
         }
         return out;
     };
+
+    std::string s = versionStr;
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)::tolower(c); });
+    if (s == "auto" || s == "default") {
+        for (const auto& v : versions) {
+            std::string vNorm = normalize(v.name);
+            if (vNorm.find("4") != std::string::npos || vNorm.find("fsr4") != std::string::npos) {
+                LogOverride(v.name + " (Auto-detected)", v.id);
+                return v.id;
+            }
+        }
+        return 0;
+    }
+
+    if (s.rfind("0x", 0) == 0) {
+        try {
+            uint64_t id = std::stoull(s, nullptr, 16);
+            LogOverride("Custom ID", id);
+            return id;
+        } catch (...) {}
+    }
 
     std::string sNorm = normalize(s);
 

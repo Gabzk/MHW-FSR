@@ -93,6 +93,9 @@ bool RecomputeRenderScale();
 // setting is given back.
 void SetDlssUnavailable(bool unavailable);
 
+// Forces renderer DLSS feature bits so game menus unlock the NVIDIA DLSS option on non-NVIDIA GPUs.
+void ForceEnableDlssSupport();
+
 // NVIDIA DLSS is on in the graphics options and the renderer runs a DLSS pass (not DLISP alone).
 bool DlssEnabledInGame();
 // NVIDIA DLSS is on in the graphics options, whichever mode the game picked for it.
