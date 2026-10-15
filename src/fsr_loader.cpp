@@ -95,10 +95,23 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
 
     if (versions.empty()) return 0;
 
+    static std::string s_lastLoggedVersionStr;
+    static uint64_t s_lastLoggedId = 0;
+    static bool s_hasLogged = false;
+
+    auto LogOverride = [&](const std::string& name, uint64_t id) {
+        if (!s_hasLogged || s_lastLoggedVersionStr != versionStr || s_lastLoggedId != id) {
+            s_lastLoggedVersionStr = versionStr;
+            s_lastLoggedId = id;
+            s_hasLogged = true;
+            LOGI("Selected FSR version override: {} ({:#x})", name, id);
+        }
+    };
+
     if (s.rfind("0x", 0) == 0) {
         try {
             uint64_t id = std::stoull(s, nullptr, 16);
-            LOGI("Selected FSR version override by hex ID: {:#x}", id);
+            LogOverride("Custom ID", id);
             return id;
         } catch (...) {}
     }
@@ -121,7 +134,7 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
         std::transform(vNameLower.begin(), vNameLower.end(), vNameLower.begin(),
                        [](unsigned char c) { return (char)::tolower(c); });
         if (vNameLower.find(s) != std::string::npos) {
-            LOGI("Selected FSR version override: {} ({:#x})", v.name, v.id);
+            LogOverride(v.name, v.id);
             return v.id;
         }
     }
@@ -130,23 +143,28 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
     for (const auto& v : versions) {
         std::string vNorm = normalize(v.name);
         if (vNorm.find(sNorm) != std::string::npos || sNorm.find(vNorm) != std::string::npos) {
-            LOGI("Selected FSR version override (normalized): {} ({:#x})", v.name, v.id);
+            LogOverride(v.name, v.id);
             return v.id;
         }
         // Also check if user specified "4" and name contains "4", or user specified "3" and name contains "3"
         if ((sNorm == "4" || sNorm == "fsr4" || sNorm == "41" || sNorm == "fsr41") &&
             (vNorm.find("4") != std::string::npos || vNorm.find("fsr4") != std::string::npos)) {
-            LOGI("Selected FSR version override: {} ({:#x})", v.name, v.id);
+            LogOverride(v.name, v.id);
             return v.id;
         }
         if ((sNorm == "3" || sNorm == "fsr3" || sNorm == "31" || sNorm == "fsr31") &&
             (vNorm.find("3") != std::string::npos || vNorm.find("fsr3") != std::string::npos)) {
-            LOGI("Selected FSR version override: {} ({:#x})", v.name, v.id);
+            LogOverride(v.name, v.id);
             return v.id;
         }
     }
 
-    LOGW("Could not match FSR version '{}', using default", versionStr);
+    if (!s_hasLogged || s_lastLoggedVersionStr != versionStr) {
+        s_lastLoggedVersionStr = versionStr;
+        s_lastLoggedId = 0;
+        s_hasLogged = true;
+        LOGW("Could not match FSR version '{}', using default", versionStr);
+    }
     return 0;
 }
 
