@@ -17,7 +17,7 @@ namespace mhwfsr::framegen {
 
 namespace {
 
-std::mutex g_mutex;
+std::recursive_mutex g_mutex;
 ffx::Context g_fgContext{};
 bool g_ready = false;
 std::atomic<bool> g_enabled = false;
@@ -51,7 +51,30 @@ void FgMessageCallback(uint32_t type, const wchar_t* message) {
     }
 }
 
+void ShutdownLocked() {
+    if (g_ready) {
+        ffx::DestroyContext(g_fgContext);
+        g_fgContext = {};
+        g_ready = false;
+        g_hudLessMirror.Reset();
+        g_hudLessResource = nullptr;
+        LOGI("AMD FidelityFX Frame Generation shutdown");
+    }
+}
+
 }  // namespace
+
+bool CheckSupport(ID3D12Device* device) {
+    if (!device) return false;
+    bool supp = loader::HasFrameGenSupport(device);
+    g_supported.store(supp);
+    if (supp) {
+        LOGI("AMD FidelityFX Frame Generation: supported on device (amd_fidelityfx_framegeneration_dx12.dll)");
+    } else {
+        LOGI("AMD FidelityFX Frame Generation: runtime provider not available on this device");
+    }
+    return supp;
+}
 
 bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMAT backBufferFormat) {
     if (!device || displayW == 0 || displayH == 0) return false;
@@ -61,7 +84,7 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
         return true;
     }
 
-    Shutdown();
+    ShutdownLocked();
 
     if (!loader::HasFrameGenSupport(device)) {
         LOGI("FSR Frame Generation: runtime provider not available on this device");
@@ -104,22 +127,13 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
 
 void Shutdown() {
     std::lock_guard lock(g_mutex);
-    if (g_ready) {
-        ffx::DestroyContext(g_fgContext);
-        g_fgContext = {};
-        g_ready = false;
-        g_hudLessMirror.Reset();
-        g_hudLessResource = nullptr;
-        LOGI("AMD FidelityFX Frame Generation shutdown");
-    }
+    ShutdownLocked();
 }
 
-void CaptureHudLess(ID3D12GraphicsCommandList* cl, ID3D12Resource* upscaleOutput) {
-    if (!g_enabled.load() || !g_ready || !cl || !upscaleOutput) {
-        g_hudLessResource = nullptr;
-        return;
-    }
-    g_hudLessResource = g_hudLessMirror.UpdateFromUav(cl, upscaleOutput);
+void CaptureHudLess(ID3D12GraphicsCommandList* /*cl*/, ID3D12Resource* /*upscaleOutput*/) {
+    // HUDLess capture is optional in FSR FG and will be fully wired with swapchain proxy.
+    // Keeping this safe and non-intrusive prevents resource barrier mismatch crashes.
+    g_hudLessResource = nullptr;
 }
 
 void RecordFrameData(const FrameData& data) {

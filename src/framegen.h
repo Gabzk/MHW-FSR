@@ -45,6 +45,7 @@ void RecordFrameData(const FrameData& data);
 bool Dispatch(ID3D12GraphicsCommandList* cl, ID3D12Resource* currentBackBuffer, ID3D12Resource* targetBuffer);
 
 // Status queries and controls
+bool CheckSupport(ID3D12Device* device);
 bool IsSupported();
 bool IsActive();
 void SetEnabled(bool enabled);

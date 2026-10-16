@@ -225,6 +225,7 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
         return false;
     }
     antilag::Init(g_device.Get());
+    framegen::CheckSupport(g_device.Get());
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
@@ -666,9 +667,6 @@ void WaitForGpu() {
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags) {
     if ((flags & DXGI_PRESENT_TEST) == 0) {
-        if (antilag::IsActive() && framegen::IsActive()) {
-            antilag::SetFrameGenFrameType(false);
-        }
         OnPresent(swapChain);
     }
     return g_realPresent(swapChain, syncInterval, flags);
@@ -676,9 +674,6 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInter
 
 HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain3* swapChain, UINT syncInterval, UINT presentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
     if ((presentFlags & DXGI_PRESENT_TEST) == 0) {
-        if (antilag::IsActive() && framegen::IsActive()) {
-            antilag::SetFrameGenFrameType(false);
-        }
         OnPresent(swapChain);
     }
     return g_realPresent1(swapChain, syncInterval, presentFlags, pPresentParameters);
