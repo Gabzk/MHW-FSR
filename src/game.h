@@ -32,6 +32,10 @@ struct Jitter {
     float fovY = 0.785398f;
     float cameraNear = 0.1f;
     float cameraFar = 10000.0f;
+    float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
+    float cameraUp[3] = {0.0f, 1.0f, 0.0f};
+    float cameraRight[3] = {1.0f, 0.0f, 0.0f};
+    float cameraForward[3] = {0.0f, 0.0f, 1.0f};
 };
 
 // Finds the game globals and hooks the TAA filter. Safe to call under the loader lock. The hooks

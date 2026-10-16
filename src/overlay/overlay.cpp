@@ -7,20 +7,23 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <format>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "antilag.h"
-#include "framegen.h"
 #include "config.h"
 #include "d3d_util.h"
+#include "framegen.h"
 #include "fsr_context.h"
 #include "fsr_loader.h"
 #include "game.h"
 #include "log.h"
 #include "memory.h"
+#include "telemetry.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_dx12.h"
@@ -37,14 +40,17 @@ using Microsoft::WRL::ComPtr;
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT);
 using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using GetCurrentBackBufferIndexFn = UINT(STDMETHODCALLTYPE*)(IDXGISwapChain3*);
 using ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 
 PresentFn g_realPresent = nullptr;
 Present1Fn g_realPresent1 = nullptr;
 ResizeBuffersFn g_realResizeBuffers = nullptr;
+GetCurrentBackBufferIndexFn g_realGetCurrentBackBufferIndex = nullptr;
 ExecuteCommandListsFn g_realExecuteCommandLists = nullptr;
 
 std::atomic<ID3D12CommandQueue*> g_gameCommandQueue{nullptr};
+std::atomic<uint64_t> g_gameBbIdxQueries{0};
 
 ComPtr<ID3D12Device> g_device;
 ComPtr<ID3D12DescriptorHeap> g_rtvHeap;
@@ -61,6 +67,17 @@ ComPtr<ID3D12Fence> g_fence;
 HANDLE g_fenceEvent = nullptr;
 UINT64 g_fenceValue = 0;
 
+// GPU-queue Frame Pacing for Frame Generation (non-blocking on game CPU thread)
+ComPtr<ID3D12Fence> g_fgPacingFence;
+HANDLE g_fgPacingTriggerEvent = nullptr;
+HANDLE g_fgPresent1DoneEvent = nullptr;
+std::thread g_fgPacingThread;
+std::atomic<bool> g_fgPacingShutdown{false};
+std::atomic<UINT64> g_fgPaceValue{0};
+std::atomic<UINT64> g_fgPendingPresent1Fence{0};
+std::atomic<UINT64> g_fgPendingPaceId{0};
+std::atomic<float> g_fgPendingDelayMs{0.0f};
+
 constexpr UINT kMinRtvDescriptors = 8;
 UINT g_rtvCapacity = 0;
 UINT g_rtvDescriptorSize = 0;
@@ -75,6 +92,69 @@ bool g_showOsd = true;
 std::string g_saveFeedback;
 std::chrono::steady_clock::time_point g_saveFeedbackTime;
 std::recursive_mutex g_mutex;
+
+void FgPacingWorkerLoop() {
+    LARGE_INTEGER qpcFreq{};
+    QueryPerformanceFrequency(&qpcFreq);
+
+    while (!g_fgPacingShutdown.load(std::memory_order_acquire)) {
+        DWORD waitRes = WaitForSingleObject(g_fgPacingTriggerEvent, 100);
+        if (g_fgPacingShutdown.load(std::memory_order_acquire)) break;
+        if (waitRes != WAIT_OBJECT_0) continue;
+
+        UINT64 targetPresent1Fence = g_fgPendingPresent1Fence.load(std::memory_order_acquire);
+        UINT64 paceId = g_fgPendingPaceId.load(std::memory_order_acquire);
+        float delayMs = g_fgPendingDelayMs.load(std::memory_order_acquire);
+
+        if (g_fence && g_fgPresent1DoneEvent && targetPresent1Fence > 0) {
+            if (g_fence->GetCompletedValue() < targetPresent1Fence) {
+                g_fence->SetEventOnCompletion(targetPresent1Fence, g_fgPresent1DoneEvent);
+                WaitForSingleObject(g_fgPresent1DoneEvent, 20);
+            }
+        }
+
+        if (delayMs > 0.2f && qpcFreq.QuadPart > 0) {
+            LARGE_INTEGER startQpc{};
+            QueryPerformanceCounter(&startQpc);
+            int64_t targetTicks = startQpc.QuadPart + static_cast<int64_t>((delayMs / 1000.0) * qpcFreq.QuadPart);
+
+            if (delayMs > 2.5f) {
+                Sleep(static_cast<DWORD>(delayMs - 1.8f));
+            }
+
+            LARGE_INTEGER nowQpc{};
+            do {
+                YieldProcessor();
+                QueryPerformanceCounter(&nowQpc);
+            } while (nowQpc.QuadPart < targetTicks && !g_fgPacingShutdown.load(std::memory_order_relaxed));
+        }
+
+        if (g_fgPacingFence && paceId > 0) {
+            g_fgPacingFence->Signal(paceId);
+        }
+    }
+}
+
+void ScheduleFgPacing(ID3D12CommandQueue* cmdQueue, UINT64 present1FenceVal, float delayMs) {
+    if (!cmdQueue || !g_fgPacingFence || !g_fgPacingTriggerEvent) return;
+
+    UINT64 paceId = ++g_fgPaceValue;
+    g_fgPendingPresent1Fence.store(present1FenceVal, std::memory_order_release);
+    g_fgPendingDelayMs.store(delayMs, std::memory_order_release);
+    g_fgPendingPaceId.store(paceId, std::memory_order_release);
+
+    cmdQueue->Wait(g_fgPacingFence.Get(), paceId);
+    SetEvent(g_fgPacingTriggerEvent);
+}
+
+UINT STDMETHODCALLTYPE HookGetCurrentBackBufferIndex(IDXGISwapChain3* swapChain) {
+    uint64_t count = g_gameBbIdxQueries.fetch_add(1, std::memory_order_relaxed);
+    UINT idx = g_realGetCurrentBackBufferIndex ? g_realGetCurrentBackBufferIndex(swapChain) : 0;
+    if (count == 0) {
+        LOGI("overlay: confirmed game queries IDXGISwapChain3::GetCurrentBackBufferIndex (initial idx={})", idx);
+    }
+    return idx;
+}
 
 void STDMETHODCALLTYPE HookExecuteCommandLists(ID3D12CommandQueue* queue, UINT numCommandLists, ID3D12CommandList* const* ppCommandLists) {
     if (queue && !g_gameCommandQueue.load(std::memory_order_relaxed)) {
@@ -226,11 +306,15 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     }
     antilag::Init(g_device.Get());
     framegen::CheckSupport(g_device.Get());
+    telemetry::Init(g_device.Get());
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
     g_hwnd = desc.OutputWindow;
     g_bufferCount = desc.BufferCount;
+
+    LOGI("overlay: swapchain BufferCount={}, {}x{}, format={}",
+         g_bufferCount, desc.BufferDesc.Width, desc.BufferDesc.Height, static_cast<int>(desc.BufferDesc.Format));
 
     if (g_config.frameGen) {
         framegen::Init(g_device.Get(), desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
@@ -287,6 +371,14 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
         return false;
     }
 
+    // GPU-queue Frame Pacing Fence & Worker Thread for Frame Generation
+    if (SUCCEEDED(g_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fgPacingFence)))) {
+        g_fgPacingTriggerEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        g_fgPresent1DoneEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        g_fgPacingShutdown.store(false);
+        g_fgPacingThread = std::thread(&FgPacingWorkerLoop);
+    }
+
     // Init ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -305,7 +397,8 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     ImGui_ImplDX12_InitInfo initInfo = {};
     initInfo.Device = g_device.Get();
     initInfo.CommandQueue = cmdQueue;
-    initInfo.NumFramesInFlight = g_bufferCount;
+    // Double the frame resources so rendering ImGui on both Interpolated and Real frames never collides
+    initInfo.NumFramesInFlight = std::max<int>(static_cast<int>(g_bufferCount) * 2, 6);
     initInfo.RTVFormat = desc.BufferDesc.Format;
     initInfo.SrvDescriptorHeap = g_srvHeap.Get();
     initInfo.LegacySingleSrvCpuDescriptor = g_srvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -338,13 +431,16 @@ void RenderOsdBadge() {
     bool dlssOn = game::DlssEnabledInGame();
     float scale = game::RenderScale();
     const char* modeName = QualityModeName(g_config.mode);
+    telemetry::Metrics m = telemetry::GetMetrics();
+    bool fgActive = framegen::IsActive();
+    bool al2Active = antilag::IsActive();
 
     ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.70f);
+    ImGui::SetNextWindowBgAlpha(0.75f);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
     if (ImGui::Begin("##MhwFsrOsd", nullptr, flags)) {
         if (dlssOn) {
@@ -360,14 +456,24 @@ void RenderOsdBadge() {
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
-        ImGui::Text("%.0f FPS", ImGui::GetIO().Framerate);
-        if (antilag::IsActive()) {
+
+        float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
+        float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
+        float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+
+        if (fgActive && dispFps > baseFps * 1.25f) {
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.0f -> %.0f FPS (%.1fms)", baseFps, dispFps, dispDt);
+        } else {
+            ImGui::Text("%.0f FPS (%.1fms)", dispFps, dispDt);
+        }
+
+        if (al2Active) {
             ImGui::SameLine();
             ImGui::TextDisabled("|");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.95f, 0.22f, 0.28f, 1.0f), "AL2");
         }
-        if (framegen::IsActive()) {
+        if (fgActive) {
             ImGui::SameLine();
             ImGui::TextDisabled("|");
             ImGui::SameLine();
@@ -375,6 +481,35 @@ void RenderOsdBadge() {
         }
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 0.8f), "[F10]");
+
+        if (g_config.showLatencyOsd && dlssOn) {
+            ImGui::Separator();
+            float upMs = m.upscaleGpuMs > 0.01f ? m.upscaleGpuMs : m.upscaleCpuMs;
+            ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 0.95f),
+                               "Upscale: %.2fms (%s)",
+                               upMs, m.upscaleGpuMs > 0.01f ? "GPU" : "CPU");
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            if (fgActive) {
+                float fgMs = m.fgGpuMs > 0.01f ? m.fgGpuMs : m.fgCpuMs;
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 0.95f), "FG: %.2fms", fgMs);
+            } else {
+                ImGui::TextDisabled("FG: OFF");
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            if (al2Active) {
+                ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 0.95f), "AL2 Wait: %.2fms", m.antiLagWaitMs);
+            } else {
+                ImGui::TextDisabled("AL2: OFF");
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 0.95f), "PC Lat: %.1fms", m.inputToPresentMs);
+        }
     }
     ImGui::End();
 }
@@ -382,22 +517,24 @@ void RenderOsdBadge() {
 void RenderMainWindow() {
     if (!g_showMenu) return;
 
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 520.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(590.0f, 560.0f), ImGuiCond_FirstUseEver);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
 
     if (ImGui::Begin("MHW-FSR :: AMD FidelityFX Control Center", &g_showMenu, flags)) {
         bool dlssOn = game::DlssEnabledInGame();
         float currentScale = game::RenderScale();
+        telemetry::Metrics m = telemetry::GetMetrics();
+        bool fgActive = framegen::IsActive();
 
         // Header Status Banner
-        ImGui::BeginChild("StatusHeader", ImVec2(0, 68), true);
+        ImGui::BeginChild("StatusHeader", ImVec2(0, 72), true);
         {
             if (dlssOn) {
-                ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "[ACTIVE] UPSCALING RUNNING");
+                ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "[ACTIVE] %s", ActiveFsrVersion().c_str());
                 ImGui::SameLine();
                 ImGui::TextDisabled("|");
                 ImGui::SameLine();
-                ImGui::Text("Intercepting game DLSS pipeline with native AMD FidelityFX");
+                ImGui::Text("Scale: %.1f%% (%s)", currentScale * 100.0f, QualityModeName(g_config.mode));
             } else {
                 ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "[PAUSED] UPSCALING PAUSED");
                 ImGui::SameLine();
@@ -406,15 +543,23 @@ void RenderMainWindow() {
                 ImGui::Text("Enable 'NVIDIA DLSS' in game Display Settings to activate");
             }
 
-            ImGui::Text("Render Scale: ");
+            float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
+            float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
+            float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+
+            ImGui::Text("Framerate: ");
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.95f, 0.25f, 0.35f, 1.0f), "%.3f (%.1f%%)", currentScale, currentScale * 100.0f);
+            if (fgActive && dispFps > baseFps * 1.25f) {
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.1f -> %.1f FPS (%.2f ms)", baseFps, dispFps, dispDt);
+            } else {
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.1f FPS (%.2f ms)", dispFps, dispDt);
+            }
             ImGui::SameLine();
             ImGui::TextDisabled(" | ");
             ImGui::SameLine();
-            ImGui::Text("Performance: ");
+            ImGui::Text("PC Latency: ");
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.1f FPS (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / (ImGui::GetIO().Framerate > 0 ? ImGui::GetIO().Framerate : 60.0f));
+            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%.1f ms", m.inputToPresentMs);
         }
         ImGui::EndChild();
 
@@ -533,11 +678,12 @@ void RenderMainWindow() {
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "AMD FIDELITYFX FRAME GENERATION");
 
                 bool fgSupported = framegen::IsSupported();
-                bool fgActive = framegen::IsActive();
 
                 if (fgSupported) {
                     if (fgActive) {
-                        ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "Status: Active (FSR FG Runtime)");
+                        ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f),
+                                           "Status: Active (2x Interpolation | %llu Frames Generated)",
+                                           static_cast<unsigned long long>(m.generatedFramesTotal));
                     } else {
                         ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "Status: Standby / Disabled");
                     }
@@ -553,7 +699,17 @@ void RenderMainWindow() {
                     }
                     framegen::SetEnabled(g_config.frameGen);
                 }
-                ImGui::TextDisabled("Generates interpolated frames using optical flow and clean HUDLess scene data to double FPS.");
+                ImGui::TextDisabled("Generates interpolated frames using optical flow and motion vectors to double effective FPS.");
+
+                if (fgActive) {
+                    ImGui::Spacing();
+                    ImGui::Checkbox("FG Debug Split View (Optical Flow / Disocclusion / MV)", &g_config.fgDebugView);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("FG Tear Lines", &g_config.fgDebugTearLines);
+                    ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f),
+                                       "FG Latency Cost: %.2f ms GPU / %.2f ms CPU  |  Frame Pacing: %.2f ms",
+                                       m.fgGpuMs, m.fgCpuMs, m.fgPaceDelayMs);
+                }
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -578,7 +734,13 @@ void RenderMainWindow() {
                 if (ImGui::Checkbox("Enable Anti-Lag 2", &g_config.antiLag2)) {
                     antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
                 }
-                ImGui::TextDisabled("Synchronizes CPU input delivery with GPU presentation to eliminate input latency.");
+                ImGui::TextDisabled("Synchronizes CPU input polling with GPU execution to minimize click-to-photon latency.");
+
+                if (active) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f),
+                                       "AL2 Driver Sync Wait: %.2f ms  |  Input-to-Present Latency: %.1f ms",
+                                       m.antiLagWaitMs, m.inputToPresentMs);
+                }
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -593,29 +755,73 @@ void RenderMainWindow() {
                 ImGui::EndTabItem();
             }
 
-            // Tab 4: Diagnostics & Comparison
-            if (ImGui::BeginTabItem("Diagnostics")) {
+            // Tab 4: Diagnostics & Telemetry Profiler
+            if (ImGui::BeginTabItem("Diagnostics & Profiler")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "VISUAL COMPARISON");
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "LATENCY & PERFORMANCE PROFILER (OPTISCALER STYLE)");
+
+                ImGui::BeginChild("ProfilerBox", ImVec2(0, 195), true);
+                {
+                    ImGui::Text("Upscaler Pass (%s):", ActiveFsrVersion().c_str());
+                    ImGui::SameLine(260);
+                    ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "%.2f ms (GPU)  /  %.2f ms (CPU)", m.upscaleGpuMs, m.upscaleCpuMs);
+
+                    ImGui::Text("Frame Generation Pass (FSR FG):");
+                    ImGui::SameLine(260);
+                    if (fgActive) {
+                        ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.2f ms (GPU)  /  %.2f ms (CPU)", m.fgGpuMs, m.fgCpuMs);
+                    } else {
+                        ImGui::TextDisabled("Disabled");
+                    }
+
+                    ImGui::Text("FG Frame Pacing Delay:");
+                    ImGui::SameLine(260);
+                    if (fgActive) {
+                        ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.2f ms", m.fgPaceDelayMs);
+                    } else {
+                        ImGui::TextDisabled("0.00 ms");
+                    }
+
+                    ImGui::Text("Anti-Lag 2 CPU Pacing Delay:");
+                    ImGui::SameLine(260);
+                    if (antilag::IsActive()) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f), "%.2f ms (amdxc64 sync)", m.antiLagWaitMs);
+                    } else {
+                        ImGui::TextDisabled("Disabled");
+                    }
+
+                    ImGui::Text("GPU Render Queue Latency:");
+                    ImGui::SameLine(260);
+                    ImGui::Text("%.2f ms", m.gpuQueueLatencyMs);
+
+                    ImGui::Text("Input-to-Present Latency (PC Latency):");
+                    ImGui::SameLine(260);
+                    ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%.1f ms", m.inputToPresentMs);
+
+                    ImGui::Separator();
+
+                    size_t histOffset = 0;
+                    const auto& hist = telemetry::GetFrameTimeHistory(histOffset);
+                    char overlayLabel[64];
+                    std::snprintf(overlayLabel, sizeof(overlayLabel), "Presented Frame Time: %.2f ms (%.1f FPS)",
+                                  m.presentedFrameTimeMs, m.presentedFps);
+                    ImGui::PlotLines("##FrameTimePlot", hist.data(), static_cast<int>(hist.size()),
+                                     static_cast<int>(histOffset), overlayLabel, 0.0f, 33.3f, ImVec2(-1, 48));
+                }
+                ImGui::EndChild();
+
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "OVERLAY & VISUAL COMPARISON");
+                ImGui::Checkbox("Show Corner Watermark (OSD)", &g_showOsd);
+                ImGui::SameLine();
+                ImGui::Checkbox("Show Latency Breakdown in OSD", &g_config.showLatencyOsd);
 
                 if (ImGui::Checkbox("Bypass FSR (Show Vanilla Capcom TAA)", &g_config.bypass)) {
                     game::ApplyConfig(g_config);
                 }
-                ImGui::TextDisabled("Toggle instantly to compare FSR's ultra-crisp edges against vanilla blurry TAA.");
 
                 ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "OVERLAY SETTINGS");
-                ImGui::Checkbox("Show Corner Watermark (OSD)", &g_showOsd);
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "TELEMETRY");
-                ImGui::Text("Jitter Status: %s", game::JitterStats().c_str());
+                ImGui::TextDisabled("Jitter Telemetry: %s", game::JitterStats().c_str());
 
                 ImGui::EndTabItem();
             }
@@ -653,6 +859,9 @@ void RenderMainWindow() {
 }
 
 void WaitForGpu() {
+    if (g_fgPacingFence) {
+        g_fgPacingFence->Signal(g_fgPaceValue.load(std::memory_order_relaxed));
+    }
     ID3D12CommandQueue* queue = g_gameCommandQueue.load();
     if (queue && g_fence && g_fenceEvent) {
         UINT64 f = ++g_fenceValue;
@@ -665,18 +874,190 @@ void WaitForGpu() {
     }
 }
 
-HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags) {
-    if ((flags & DXGI_PRESENT_TEST) == 0) {
-        OnPresent(swapChain);
+HRESULT CallRealPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
+    if (pPresentParameters && g_realPresent1) {
+        return g_realPresent1(swapChain, syncInterval, flags, pPresentParameters);
     }
     return g_realPresent(swapChain, syncInterval, flags);
 }
 
-HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain3* swapChain, UINT syncInterval, UINT presentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
-    if ((presentFlags & DXGI_PRESENT_TEST) == 0) {
-        OnPresent(swapChain);
+void RecordImGuiOnBackBuffer(UINT backBufferIdx) {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = g_renderTargets[backBufferIdx].Get();
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    g_commandList->ResourceBarrier(1, &barrier);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvHandle.ptr += backBufferIdx * g_rtvDescriptorSize;
+    g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+    ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
+    g_commandList->SetDescriptorHeaps(1, heaps);
+
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_commandList.Get());
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    g_commandList->ResourceBarrier(1, &barrier);
+}
+
+void ExecuteOverlayCommandList(ID3D12CommandQueue* cmdQueue, FrameContext& frameCtx) {
+    g_commandList->Close();
+    ID3D12CommandList* cmdLists[] = { g_commandList.Get() };
+    if (g_realExecuteCommandLists) {
+        g_realExecuteCommandLists(cmdQueue, 1, cmdLists);
+    } else {
+        cmdQueue->ExecuteCommandLists(1, cmdLists);
     }
-    return g_realPresent1(swapChain, syncInterval, presentFlags, pPresentParameters);
+    UINT64 currentFence = ++g_fenceValue;
+    cmdQueue->Signal(g_fence.Get(), currentFence);
+    frameCtx.fenceValue = currentFence;
+}
+
+UINT QueryBackBufferIndex(IDXGISwapChain3* swapChain) {
+    return g_realGetCurrentBackBufferIndex
+               ? g_realGetCurrentBackBufferIndex(swapChain)
+               : swapChain->GetCurrentBackBufferIndex();
+}
+
+HRESULT PresentWithOverlayAndFg(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
+    if ((flags & DXGI_PRESENT_TEST) != 0) {
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+
+    ID3D12CommandQueue* cmdQueue = g_gameCommandQueue.load();
+    if (!cmdQueue) {
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) {
+        if (!InitD3D12(swapChain)) {
+            return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+        }
+        g_initialized = true;
+    }
+
+    static uint64_t s_lastFrame = 0;
+    uint64_t frame = game::Frame();
+    if (frame != 0 && frame == s_lastFrame) {
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+    s_lastFrame = frame;
+
+    telemetry::OnRealFramePresent(cmdQueue);
+
+    bool drawUi = (g_showMenu || g_showOsd);
+    if (drawUi) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.MouseDrawCursor = g_showMenu;
+
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        RenderOsdBadge();
+        RenderMainWindow();
+
+        ImGui::Render();
+    }
+
+    bool tryFg = framegen::HasPendingFrame();
+    if (!tryFg && !drawUi) {
+        antilag::SetFrameGenFrameType(false);
+        telemetry::OnSwapChainPresent();
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+
+    UINT bbIdx0 = QueryBackBufferIndex(swapChain);
+    if (bbIdx0 >= g_renderTargets.size() || !g_renderTargets[bbIdx0] || bbIdx0 >= g_frameContexts.size()) {
+        antilag::SetFrameGenFrameType(false);
+        telemetry::OnSwapChainPresent();
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+
+    FrameContext& frameCtx0 = g_frameContexts[bbIdx0];
+    if (frameCtx0.fenceValue != 0 && g_fence->GetCompletedValue() < frameCtx0.fenceValue) {
+        g_fence->SetEventOnCompletion(frameCtx0.fenceValue, g_fenceEvent);
+        WaitForSingleObject(g_fenceEvent, 2000);
+    }
+
+    frameCtx0.commandAllocator->Reset();
+    g_commandList->Reset(frameCtx0.commandAllocator.Get(), nullptr);
+
+    bool fgGenerated = false;
+    if (tryFg) {
+        telemetry::BeginFrameGenPass(g_commandList.Get());
+        fgGenerated = framegen::GenerateInterpolatedFrame(g_commandList.Get(), g_renderTargets[bbIdx0].Get());
+        telemetry::EndFrameGenPass(g_commandList.Get());
+    }
+
+    if (drawUi) {
+        RecordImGuiOnBackBuffer(bbIdx0);
+    }
+
+    ExecuteOverlayCommandList(cmdQueue, frameCtx0);
+
+    if (!fgGenerated) {
+        antilag::SetFrameGenFrameType(false);
+        telemetry::OnSwapChainPresent();
+        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    }
+
+    // --- PASS 1: Present the Interpolated Frame (N - 0.5) ---
+    antilag::SetFrameGenFrameType(true);
+    telemetry::NoteInterpolatedFramePresented();
+    telemetry::OnSwapChainPresent();
+    HRESULT hr1 = CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+    if (FAILED(hr1)) {
+        return hr1;
+    }
+
+    // --- GPU-Queue Frame Pacing between Interpolated Frame and Real Frame ---
+    float baseDtMs = telemetry::GetMetrics().baseFrameTimeMs;
+    if (syncInterval == 0) {
+        float paceMs = std::clamp(baseDtMs * 0.35f, 1.5f, 8.0f);
+        ScheduleFgPacing(cmdQueue, frameCtx0.fenceValue, paceMs);
+        telemetry::RecordFgPaceDelay(paceMs);
+    } else {
+        telemetry::RecordFgPaceDelay(baseDtMs * 0.5f);
+    }
+
+    // --- PASS 2: Restore and Present the Real Frame (N) on the next backbuffer ---
+    UINT bbIdx1 = QueryBackBufferIndex(swapChain);
+    if (bbIdx1 < g_renderTargets.size() && g_renderTargets[bbIdx1] && bbIdx1 < g_frameContexts.size()) {
+        FrameContext& frameCtx1 = g_frameContexts[bbIdx1];
+        if (frameCtx1.fenceValue != 0 && g_fence->GetCompletedValue() < frameCtx1.fenceValue) {
+            g_fence->SetEventOnCompletion(frameCtx1.fenceValue, g_fenceEvent);
+            WaitForSingleObject(g_fenceEvent, 2000);
+        }
+
+        frameCtx1.commandAllocator->Reset();
+        g_commandList->Reset(frameCtx1.commandAllocator.Get(), nullptr);
+
+        framegen::CopyRealFrameToBackBuffer(g_commandList.Get(), g_renderTargets[bbIdx1].Get());
+
+        if (drawUi) {
+            RecordImGuiOnBackBuffer(bbIdx1);
+        }
+
+        ExecuteOverlayCommandList(cmdQueue, frameCtx1);
+    }
+
+    antilag::SetFrameGenFrameType(false);
+    telemetry::OnSwapChainPresent();
+    return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
+}
+
+HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain3* swapChain, UINT syncInterval, UINT flags) {
+    return PresentWithOverlayAndFg(swapChain, syncInterval, flags, nullptr);
+}
+
+HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain3* swapChain, UINT syncInterval, UINT presentFlags, const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
+    return PresentWithOverlayAndFg(swapChain, syncInterval, presentFlags, pPresentParameters);
 }
 
 HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain3* swapChain, UINT bufferCount, UINT width, UINT height, DXGI_FORMAT newFormat, UINT swapChainFlags) {
@@ -726,86 +1107,16 @@ void TryInstall() {
     g_realPresent = reinterpret_cast<PresentFn>(mem::WritePointer(&vtable[8], reinterpret_cast<void*>(&HookPresent)));
     g_realResizeBuffers = reinterpret_cast<ResizeBuffersFn>(mem::WritePointer(&vtable[13], reinterpret_cast<void*>(&HookResizeBuffers)));
     g_realPresent1 = reinterpret_cast<Present1Fn>(mem::WritePointer(&vtable[22], reinterpret_cast<void*>(&HookPresent1)));
+    g_realGetCurrentBackBufferIndex = reinterpret_cast<GetCurrentBackBufferIndexFn>(
+        mem::WritePointer(&vtable[36], reinterpret_cast<void*>(&HookGetCurrentBackBufferIndex))
+    );
 
     g_hooked.store(true);
-    LOGI("MHW-FSR: DirectX 12 SwapChain hooked successfully for in-game overlay");
+    LOGI("MHW-FSR: DirectX 12 SwapChain hooked successfully for in-game overlay & Frame Generation");
 }
 
-void OnPresent(IDXGISwapChain3* swapChain) {
-    ID3D12CommandQueue* cmdQueue = g_gameCommandQueue.load();
-    if (!cmdQueue) return;
-
-    std::lock_guard lock(g_mutex);
-    if (!g_initialized) {
-        if (!InitD3D12(swapChain)) return;
-        g_initialized = true;
-    }
-    static uint64_t s_lastFrame = 0;
-    uint64_t frame = game::Frame();
-    if (frame != 0 && frame == s_lastFrame) return;
-    s_lastFrame = frame;
-
-    if (!g_showMenu && !g_showOsd) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.MouseDrawCursor = g_showMenu;
-
-    ImGui_ImplDX12_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-
-    RenderOsdBadge();
-    RenderMainWindow();
-
-    ImGui::Render();
-
-    UINT backBufferIdx = swapChain->GetCurrentBackBufferIndex();
-    if (backBufferIdx >= g_renderTargets.size() || !g_renderTargets[backBufferIdx]) return;
-    if (backBufferIdx >= g_frameContexts.size()) return;
-
-    FrameContext& frameCtx = g_frameContexts[backBufferIdx];
-
-    // Wait if this frame context is still in flight on GPU
-    if (frameCtx.fenceValue != 0 && g_fence->GetCompletedValue() < frameCtx.fenceValue) {
-        g_fence->SetEventOnCompletion(frameCtx.fenceValue, g_fenceEvent);
-        WaitForSingleObject(g_fenceEvent, 2000);
-    }
-
-    frameCtx.commandAllocator->Reset();
-    g_commandList->Reset(frameCtx.commandAllocator.Get(), nullptr);
-
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = g_renderTargets[backBufferIdx].Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    g_commandList->ResourceBarrier(1, &barrier);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtvHandle.ptr += backBufferIdx * g_rtvDescriptorSize;
-    g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-    ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
-    g_commandList->SetDescriptorHeaps(1, heaps);
-
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_commandList.Get());
-
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    g_commandList->ResourceBarrier(1, &barrier);
-
-    g_commandList->Close();
-    ID3D12CommandList* cmdLists[] = { g_commandList.Get() };
-    if (g_realExecuteCommandLists) {
-        g_realExecuteCommandLists(cmdQueue, 1, cmdLists);
-    } else {
-        cmdQueue->ExecuteCommandLists(1, cmdLists);
-    }
-
-    UINT64 currentFence = ++g_fenceValue;
-    cmdQueue->Signal(g_fence.Get(), currentFence);
-    frameCtx.fenceValue = currentFence;
+void OnPresent(IDXGISwapChain3* /*swapChain*/) {
+    // Handled directly inside PresentWithOverlayAndFg
 }
 
 void OnPreResize() {

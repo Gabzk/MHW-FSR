@@ -256,6 +256,9 @@ void LoadConfig(const std::wstring& ini) {
 
     // [FrameGeneration]
     c.frameGen = ReadBool(ini, L"FrameGeneration", L"FrameGen", c.frameGen);
+    c.fgDebugView = ReadBool(ini, L"FrameGeneration", L"DebugView", c.fgDebugView);
+    c.fgDebugTearLines = ReadBool(ini, L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
+    c.showLatencyOsd = ReadBool(ini, L"General", L"ShowLatencyOSD", c.showLatencyOsd);
 
     // [Advanced]
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
@@ -338,6 +341,9 @@ void SaveConfig(const Config& c) {
     writeBool(L"AntiLag", L"AntiLag2", c.antiLag2);
     writeFloat(L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps));
     writeBool(L"FrameGeneration", L"FrameGen", c.frameGen);
+    writeBool(L"FrameGeneration", L"DebugView", c.fgDebugView);
+    writeBool(L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
+    writeBool(L"General", L"ShowLatencyOSD", c.showLatencyOsd);
     g_iniTime = LastWrite(g_iniPath);
 }
 

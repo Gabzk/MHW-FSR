@@ -196,7 +196,9 @@ constexpr float kCutProjection = 0.05f;    // relative change of the projection'
 
 struct CameraShot {
     std::array<float, 3> position{};
-    std::array<float, 3> forward{};
+    std::array<float, 3> up{0.0f, 1.0f, 0.0f};
+    std::array<float, 3> right{1.0f, 0.0f, 0.0f};
+    std::array<float, 3> forward{0.0f, 0.0f, 1.0f};
     std::array<float, 2> scale{};
     float fovY = 0.785398f;
     float nearZ = 0.1f;
@@ -228,6 +230,8 @@ std::optional<CameraShot> ReadShot(uint8_t* camera) {
         shot.viewport = i;
         for (int j = 0; j < 3; ++j) {
             shot.position[j] = -(v[12] * v[j * 4 + 0] + v[13] * v[j * 4 + 1] + v[14] * v[j * 4 + 2]);
+            shot.right[j] = v[j * 4 + 0];
+            shot.up[j] = v[j * 4 + 1];
             shot.forward[j] = v[j * 4 + 2];
         }
         shot.scale = {(*proj)[0], (*proj)[5]};
@@ -344,6 +348,12 @@ void CaptureJitter(uint8_t* taa) {
         rec.jitter.fovY = g_lastShot->fovY;
         rec.jitter.cameraNear = g_lastShot->nearZ;
         rec.jitter.cameraFar = g_lastShot->farZ;
+        for (int j = 0; j < 3; ++j) {
+            rec.jitter.cameraPosition[j] = g_lastShot->position[j];
+            rec.jitter.cameraUp[j] = g_lastShot->up[j];
+            rec.jitter.cameraRight[j] = g_lastShot->right[j];
+            rec.jitter.cameraForward[j] = g_lastShot->forward[j];
+        }
     }
     g_jitterRecords[g_jitterNext] = rec;
     g_jitterNext = (g_jitterNext + 1) % g_jitterRecords.size();

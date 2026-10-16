@@ -2,6 +2,7 @@
 #include "../third_party/amd/antilag2/ffx_antilag2_dx12.h"
 #include "log.h"
 #include "config.h"
+#include "telemetry.h"
 
 #include <mutex>
 #include <atomic>
@@ -56,13 +57,16 @@ void Shutdown() {
 }
 
 void Update(bool enabled, uint32_t maxFps) {
+    telemetry::BeginAntiLagUpdate();
     if (!g_supported.load()) {
         g_active.store(false);
+        telemetry::EndAntiLagUpdate(false);
         return;
     }
 
     HRESULT hr = AMD::AntiLag2DX12::Update(&g_context, enabled, maxFps);
     bool active = enabled && SUCCEEDED(hr);
+    telemetry::EndAntiLagUpdate(active);
     if (active != g_active.load()) {
         LOGI("AMD FidelityFX Anti-Lag 2: status changed to {} (enabled={}, maxFps={})",
              active ? "ACTIVE" : "INACTIVE", enabled, maxFps);

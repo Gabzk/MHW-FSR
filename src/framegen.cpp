@@ -5,9 +5,10 @@
 #include "fsr_loader.h"
 #include "log.h"
 
-#include <mutex>
-#include <atomic>
 #include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <mutex>
 
 #include <ffx_api.hpp>
 #include <ffx_framegeneration.hpp>
@@ -20,44 +21,91 @@ namespace {
 std::recursive_mutex g_mutex;
 ffx::Context g_fgContext{};
 bool g_ready = false;
-std::atomic<bool> g_enabled = false;
-std::atomic<bool> g_supported = false;
+std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_supported{false};
+std::atomic<bool> g_hasFrameData{false};
 
 uint32_t g_displayW = 0;
 uint32_t g_displayH = 0;
 DXGI_FORMAT g_format = DXGI_FORMAT_UNKNOWN;
+uint64_t g_fgFrameId = 0;
 
-d3d::Mirror12 g_hudLessMirror;
-ID3D12Resource* g_hudLessResource = nullptr;
+d3d::Mirror12 g_depthMirror;
+d3d::Mirror12 g_motionMirror;
+ComPtr<ID3D12Resource> g_realFrameBackup;
+ComPtr<ID3D12Resource> g_interpOutput;
 FrameData g_frameData{};
 
-void FgMessageCallback(uint32_t type, const wchar_t* message) {
-    if (!message) return;
-    std::wstring_view msg(message);
-    while (!msg.empty() && (msg.back() == L'\n' || msg.back() == L'\r')) {
-        msg.remove_suffix(1);
-    }
-    int len = WideCharToMultiByte(CP_UTF8, 0, msg.data(), static_cast<int>(msg.size()), nullptr, 0, nullptr, nullptr);
-    if (len > 0) {
-        std::string narrow(len, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, msg.data(), static_cast<int>(msg.size()), narrow.data(), len, nullptr, nullptr);
-        if (type == FFX_API_MESSAGE_TYPE_ERROR) {
-            LOGE("[FSR FG] {}", narrow);
-        } else if (type == FFX_API_MESSAGE_TYPE_WARNING) {
-            LOGW("[FSR FG] {}", narrow);
-        } else {
-            LOGD("[FSR FG] {}", narrow);
-        }
+DXGI_FORMAT NormalizeFormat(DXGI_FORMAT fmt) {
+    switch (fmt) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+            return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        default:
+            return fmt;
     }
 }
 
+bool CreateInternalTextures(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format) {
+    g_realFrameBackup.Reset();
+    g_interpOutput.Reset();
+
+    D3D12_HEAP_PROPERTIES heapProps{};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Alignment = 0;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                                 IID_PPV_ARGS(&g_realFrameBackup));
+    if (FAILED(hr)) {
+        LOGE("FSR FG: failed to create g_realFrameBackup ({}x{}, fmt {}, hr {:#x})",
+             width, height, static_cast<int>(format), static_cast<uint32_t>(hr));
+        return false;
+    }
+
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                         IID_PPV_ARGS(&g_interpOutput));
+    if (FAILED(hr)) {
+        LOGE("FSR FG: failed to create g_interpOutput UAV ({}x{}, fmt {}, hr {:#x})",
+             width, height, static_cast<int>(format), static_cast<uint32_t>(hr));
+        g_realFrameBackup.Reset();
+        return false;
+    }
+
+    return true;
+}
+
 void ShutdownLocked() {
+    g_hasFrameData.store(false);
+    g_depthMirror.Reset();
+    g_motionMirror.Reset();
+    d3d::Retire(std::move(g_realFrameBackup));
+    d3d::Retire(std::move(g_interpOutput));
     if (g_ready) {
         ffx::DestroyContext(g_fgContext);
         g_fgContext = {};
         g_ready = false;
-        g_hudLessMirror.Reset();
-        g_hudLessResource = nullptr;
         LOGI("AMD FidelityFX Frame Generation shutdown");
     }
 }
@@ -79,8 +127,11 @@ bool CheckSupport(ID3D12Device* device) {
 bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMAT backBufferFormat) {
     if (!device || displayW == 0 || displayH == 0) return false;
 
+    DXGI_FORMAT normFormat = NormalizeFormat(backBufferFormat);
+
     std::lock_guard lock(g_mutex);
-    if (g_ready && g_displayW == displayW && g_displayH == displayH && g_format == backBufferFormat) {
+    if (g_ready && g_displayW == displayW && g_displayH == displayH && g_format == normFormat &&
+        g_realFrameBackup && g_interpOutput) {
         return true;
     }
 
@@ -93,15 +144,24 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
     }
     g_supported.store(true);
 
-    uint32_t flags = FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
+    if (!CreateInternalTextures(device, displayW, displayH, normFormat)) {
+        return false;
+    }
+
+    uint32_t flags = 0;
+    if (normFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || normFormat == DXGI_FORMAT_R10G10B10A2_UNORM ||
+        normFormat == DXGI_FORMAT_R11G11B10_FLOAT) {
+        flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
+    }
     if (g_config.depthInverted) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED;
     if (g_config.depthInfinite) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+    if (g_config.mvJittered) flags |= FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
 
     ffx::CreateContextDescFrameGeneration fgDesc{};
     fgDesc.flags = flags;
     fgDesc.displaySize = { displayW, displayH };
     fgDesc.maxRenderSize = { displayW, displayH };
-    fgDesc.backBufferFormat = ffxApiGetSurfaceFormatDX12(backBufferFormat);
+    fgDesc.backBufferFormat = ffxApiGetSurfaceFormatDX12(normFormat);
 
     ffx::CreateContextDescFrameGenerationVersion versionDesc{};
     versionDesc.version = FFX_FRAMEGENERATION_VERSION;
@@ -112,16 +172,20 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
     ffx::ReturnCode rc = ffx::CreateContext(g_fgContext, nullptr, fgDesc, backendDesc, versionDesc);
     if (!rc) {
         LOGE("FSR Frame Generation CreateContext failed (code {:#x})", static_cast<uint32_t>(rc));
+        g_realFrameBackup.Reset();
+        g_interpOutput.Reset();
         return false;
     }
 
     g_displayW = displayW;
     g_displayH = displayH;
-    g_format = backBufferFormat;
+    g_format = normFormat;
+    g_fgFrameId = 0;
+    g_hasFrameData.store(false);
     g_ready = true;
 
     LOGI("AMD FidelityFX Frame Generation initialized successfully ({}x{}, format {})",
-         displayW, displayH, static_cast<int>(backBufferFormat));
+         displayW, displayH, static_cast<int>(normFormat));
     return true;
 }
 
@@ -131,81 +195,194 @@ void Shutdown() {
 }
 
 void CaptureHudLess(ID3D12GraphicsCommandList* /*cl*/, ID3D12Resource* /*upscaleOutput*/) {
-    // HUDLess capture is optional in FSR FG and will be fully wired with swapchain proxy.
-    // Keeping this safe and non-intrusive prevents resource barrier mismatch crashes.
-    g_hudLessResource = nullptr;
+    // FSR FG uses the post-tonemapped backbuffer directly as interpolation source so HDR/SDR
+    // color spaces match the swapchain backbuffer 1:1.
 }
 
-void RecordFrameData(const FrameData& data) {
+void RecordFrameData(ID3D12GraphicsCommandList* cl, const FrameData& data) {
+    if (!IsActive() || !cl || !data.depth || !data.motion) {
+        g_hasFrameData.store(false);
+        return;
+    }
+
     std::lock_guard lock(g_mutex);
+    ID3D12Resource* mirroredDepth = g_depthMirror.Update(cl, data.depth);
+    ID3D12Resource* mirroredMotion = g_motionMirror.Update(cl, data.motion);
+    if (!mirroredDepth || !mirroredMotion) {
+        g_hasFrameData.store(false);
+        return;
+    }
+
     g_frameData = data;
+    g_frameData.depth = mirroredDepth;
+    g_frameData.motion = mirroredMotion;
+    g_hasFrameData.store(true);
 }
 
-bool Dispatch(ID3D12GraphicsCommandList* cl, ID3D12Resource* currentBackBuffer, ID3D12Resource* targetBuffer) {
-    if (!g_enabled.load() || !g_ready || !cl || !currentBackBuffer || !targetBuffer) {
+bool HasPendingFrame() {
+    return IsActive() && g_hasFrameData.load(std::memory_order_acquire);
+}
+
+bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* currentBackBuffer) {
+    if (!IsActive() || !cl || !currentBackBuffer) {
         return false;
     }
 
     std::lock_guard lock(g_mutex);
-    if (!g_frameData.depth || !g_frameData.motion) {
+    if (!g_hasFrameData.exchange(false) || !g_frameData.depth || !g_frameData.motion ||
+        !g_realFrameBackup || !g_interpOutput) {
         return false;
     }
 
-    // 1. Configure Frame Generation with HUDLess texture if captured
+    // Check if backbuffer dimensions match
+    D3D12_RESOURCE_DESC bbDesc = currentBackBuffer->GetDesc();
+    if (bbDesc.Width != g_displayW || bbDesc.Height != g_displayH) {
+        return false;
+    }
+
+    // 1. Copy currentBackBuffer (Real Frame N in PRESENT state) -> g_realFrameBackup
+    {
+        d3d::BarrierBatcher batcher(cl);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        batcher.Transition(g_realFrameBackup.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        batcher.Flush();
+
+        cl->CopyResource(g_realFrameBackup.Get(), currentBackBuffer);
+
+        batcher.Transition(g_realFrameBackup.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        batcher.Flush();
+    }
+
+    const uint64_t fgFrameId = ++g_fgFrameId;
+    const bool reset = g_frameData.reset || (fgFrameId == 1);
+
+    // 2. Configure Frame Generation with NO_SWAPCHAIN_CONTEXT_NOTIFY
     ffx::ConfigureDescFrameGeneration configDesc{};
+    configDesc.swapChain = nullptr;
+    configDesc.presentCallback = nullptr;
+    configDesc.presentCallbackUserContext = nullptr;
+    configDesc.frameGenerationCallback = nullptr;
+    configDesc.frameGenerationCallbackUserContext = nullptr;
     configDesc.frameGenerationEnabled = true;
     configDesc.allowAsyncWorkloads = false;
-    if (g_hudLessResource) {
-        configDesc.HUDLessColor = ffxApiGetResourceDX12(g_hudLessResource, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    configDesc.HUDLessColor = FfxApiResource({});
+    configDesc.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+    if (g_config.fgDebugView) {
+        configDesc.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
     }
+    if (g_config.fgDebugTearLines) {
+        configDesc.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES |
+                            FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_RESET_INDICATORS;
+    }
+    configDesc.onlyPresentGenerated = false;
     configDesc.generationRect = { 0, 0, static_cast<int32_t>(g_displayW), static_cast<int32_t>(g_displayH) };
-    configDesc.frameID = g_frameData.frameId;
-    ffx::Configure(g_fgContext, configDesc);
+    configDesc.frameID = fgFrameId;
 
-    // 2. Prepare frame data (dilated depth & motion vectors, camera info)
+    ffx::ReturnCode rc = ffx::Configure(g_fgContext, configDesc);
+    if (!rc) {
+        LOGW("FSR FG Configure failed (code {:#x})", static_cast<uint32_t>(rc));
+        d3d::BarrierBatcher batcher(cl);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        batcher.Flush();
+        return false;
+    }
+
+    // 3. Prepare frame data (dilated depth & motion vectors, camera info)
     ffx::DispatchDescFrameGenerationPrepareV2 prepDesc{};
     prepDesc.commandList = cl;
+    prepDesc.frameID = fgFrameId;
+    prepDesc.flags = configDesc.flags;
     prepDesc.renderSize = { g_frameData.renderW, g_frameData.renderH };
     prepDesc.jitterOffset = { g_frameData.jitterX, g_frameData.jitterY };
     prepDesc.motionVectorScale = { g_frameData.mvScaleX, g_frameData.mvScaleY };
-    prepDesc.frameTimeDelta = g_frameData.deltaMs;
-    prepDesc.reset = g_frameData.reset;
+    prepDesc.frameTimeDelta = std::max(0.1f, g_frameData.deltaMs);
     prepDesc.cameraNear = g_frameData.cameraNear;
     prepDesc.cameraFar = g_frameData.cameraFar;
     prepDesc.cameraFovAngleVertical = g_frameData.fovY;
     prepDesc.viewSpaceToMetersFactor = 1.0f;
     prepDesc.depth = ffxApiGetResourceDX12(g_frameData.depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     prepDesc.motionVectors = ffxApiGetResourceDX12(g_frameData.motion, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    prepDesc.frameID = g_frameData.frameId;
+    std::memcpy(prepDesc.cameraPosition, g_frameData.cameraPosition, sizeof(prepDesc.cameraPosition));
+    std::memcpy(prepDesc.cameraUp, g_frameData.cameraUp, sizeof(prepDesc.cameraUp));
+    std::memcpy(prepDesc.cameraRight, g_frameData.cameraRight, sizeof(prepDesc.cameraRight));
+    std::memcpy(prepDesc.cameraForward, g_frameData.cameraForward, sizeof(prepDesc.cameraForward));
+    prepDesc.reset = reset;
 
-    ffx::ReturnCode rc = ffx::Dispatch(g_fgContext, prepDesc);
+    rc = ffx::Dispatch(g_fgContext, prepDesc);
     if (!rc) {
-        LOGW("FSR FG Prepare failed (code {:#x})", static_cast<uint32_t>(rc));
+        LOGW("FSR FG PrepareV2 failed (code {:#x})", static_cast<uint32_t>(rc));
+        d3d::BarrierBatcher batcher(cl);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        batcher.Flush();
         return false;
     }
 
-    // 3. Dispatch interpolated frame generation
+    // 4. Dispatch Optical Flow + Frame Interpolation into g_interpOutput
     ffx::DispatchDescFrameGeneration genDesc{};
     genDesc.commandList = cl;
-    genDesc.presentColor = ffxApiGetResourceDX12(currentBackBuffer, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    genDesc.outputs[0] = ffxApiGetResourceDX12(targetBuffer, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    genDesc.presentColor = ffxApiGetResourceDX12(g_realFrameBackup.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    genDesc.outputs[0] = ffxApiGetResourceDX12(g_interpOutput.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     genDesc.numGeneratedFrames = 1;
-    genDesc.reset = g_frameData.reset;
-    genDesc.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    genDesc.reset = reset;
+    if (g_format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        genDesc.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB;
+    } else if (g_format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        genDesc.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ;
+    } else {
+        genDesc.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    }
+    genDesc.minMaxLuminance[0] = 0.0f;
+    genDesc.minMaxLuminance[1] = 1000.0f;
     genDesc.generationRect = { 0, 0, static_cast<int32_t>(g_displayW), static_cast<int32_t>(g_displayH) };
-    genDesc.frameID = g_frameData.frameId;
+    genDesc.frameID = fgFrameId;
 
     rc = ffx::Dispatch(g_fgContext, genDesc);
     if (!rc) {
         LOGW("FSR FG Dispatch failed (code {:#x})", static_cast<uint32_t>(rc));
+        d3d::BarrierBatcher batcher(cl);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        batcher.Flush();
         return false;
     }
 
-    // 4. Synchronize GPU UAV writes on output
+    // 5. Copy g_interpOutput (interpolated frame) -> currentBackBuffer and restore states
+    {
+        d3d::BarrierBatcher batcher(cl);
+        batcher.Uav(g_interpOutput.Get());
+        batcher.Transition(g_interpOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        batcher.Flush();
+
+        cl->CopyResource(currentBackBuffer, g_interpOutput.Get());
+
+        batcher.Transition(g_interpOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        batcher.Transition(currentBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        batcher.Flush();
+    }
+
+    if (fgFrameId <= 3 || (fgFrameId & (fgFrameId - 1)) == 0) {
+        LOGI("FSR FG generated frame #{} ({}x{} -> {}x{}, reset={})",
+             fgFrameId, g_frameData.renderW, g_frameData.renderH, g_displayW, g_displayH, reset);
+    }
+
+    return true;
+}
+
+bool CopyRealFrameToBackBuffer(ID3D12GraphicsCommandList* cl, ID3D12Resource* targetBackBuffer) {
+    if (!cl || !targetBackBuffer) return false;
+    std::lock_guard lock(g_mutex);
+    if (!g_realFrameBackup) return false;
+
     d3d::BarrierBatcher batcher(cl);
-    batcher.Uav(targetBuffer);
+    batcher.Transition(g_realFrameBackup.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    batcher.Transition(targetBackBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     batcher.Flush();
 
+    cl->CopyResource(targetBackBuffer, g_realFrameBackup.Get());
+
+    batcher.Transition(g_realFrameBackup.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    batcher.Transition(targetBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    batcher.Flush();
     return true;
 }
 
@@ -218,7 +395,13 @@ bool IsActive() {
 }
 
 void SetEnabled(bool enabled) {
-    g_enabled.store(enabled);
+    bool prev = g_enabled.exchange(enabled);
+    if (enabled && !prev) {
+        g_fgFrameId = 0;
+        g_hasFrameData.store(false);
+    } else if (!enabled) {
+        g_hasFrameData.store(false);
+    }
 }
 
 bool IsEnabled() {

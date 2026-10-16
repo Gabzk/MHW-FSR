@@ -26,6 +26,7 @@
 #include "ngx_params.h"
 #include "overlay/overlay.h"
 #include "probe.h"
+#include "telemetry.h"
 
 namespace mhwfsr::ngx {
 
@@ -89,6 +90,10 @@ struct UpscaleInputs {
     unsigned x = 0, y = 0, width = 0, height = 0;
     float jitterX = 0, jitterY = 0;
     float cameraNear = 0.1f, cameraFar = 10000.0f, cameraFov = 0.785398f;
+    float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
+    float cameraUp[3] = {0.0f, 1.0f, 0.0f};
+    float cameraRight[3] = {1.0f, 0.0f, 0.0f};
+    float cameraForward[3] = {0.0f, 0.0f, 1.0f};
     int reset = 0;
     uint64_t frame = 0;
 };
@@ -327,6 +332,10 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
             g_upscale.cameraNear = jitter->cameraNear;
             g_upscale.cameraFar = jitter->cameraFar;
             g_upscale.cameraFov = jitter->fovY;
+            std::memcpy(g_upscale.cameraPosition, jitter->cameraPosition, sizeof(g_upscale.cameraPosition));
+            std::memcpy(g_upscale.cameraUp, jitter->cameraUp, sizeof(g_upscale.cameraUp));
+            std::memcpy(g_upscale.cameraRight, jitter->cameraRight, sizeof(g_upscale.cameraRight));
+            std::memcpy(g_upscale.cameraForward, jitter->cameraForward, sizeof(g_upscale.cameraForward));
         }
 
         if (f.evaluations++ < kDetailedEvaluations) {
@@ -385,7 +394,9 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     dp.cameraFovAngleVertical = jitter ? jitter->fovY : 0.785398f;
     dp.reset = (reset != 0);
 
+    telemetry::BeginUpscalePass(cl);
     bool ok = f.fsr.Dispatch(dp);
+    telemetry::EndUpscalePass(cl);
     if (ok) {
         framegen::CaptureHudLess(cl, output);
         framegen::FrameData fd{};
@@ -402,10 +413,16 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
         fd.cameraNear = dp.cameraNear;
         fd.cameraFar = dp.cameraFar;
         fd.fovY = dp.cameraFovAngleVertical;
+        if (jitter) {
+            std::memcpy(fd.cameraPosition, jitter->cameraPosition, sizeof(fd.cameraPosition));
+            std::memcpy(fd.cameraUp, jitter->cameraUp, sizeof(fd.cameraUp));
+            std::memcpy(fd.cameraRight, jitter->cameraRight, sizeof(fd.cameraRight));
+            std::memcpy(fd.cameraForward, jitter->cameraForward, sizeof(fd.cameraForward));
+        }
         fd.deltaMs = dp.frameTimeDeltaMs;
         fd.reset = dp.reset;
         fd.frameId = frame;
-        framegen::RecordFrameData(fd);
+        framegen::RecordFrameData(cl, fd);
     }
     LogEvaluation(f, ok, rect.width, rect.height, outputInfo.width, outputInfo.height, jx, jy, frame, reset);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
@@ -493,7 +510,9 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
     dp.cameraFovAngleVertical = g_upscale.cameraFov;
     dp.reset = (reset != 0);
 
+    telemetry::BeginUpscalePass(cl);
     bool ok = f.fsr.Dispatch(dp);
+    telemetry::EndUpscalePass(cl);
     if (ok) {
         framegen::CaptureHudLess(cl, output);
         framegen::FrameData fd{};
@@ -510,10 +529,14 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
         fd.cameraNear = dp.cameraNear;
         fd.cameraFar = dp.cameraFar;
         fd.fovY = dp.cameraFovAngleVertical;
+        std::memcpy(fd.cameraPosition, g_upscale.cameraPosition, sizeof(fd.cameraPosition));
+        std::memcpy(fd.cameraUp, g_upscale.cameraUp, sizeof(fd.cameraUp));
+        std::memcpy(fd.cameraRight, g_upscale.cameraRight, sizeof(fd.cameraRight));
+        std::memcpy(fd.cameraForward, g_upscale.cameraForward, sizeof(fd.cameraForward));
         fd.deltaMs = dp.frameTimeDeltaMs;
         fd.reset = dp.reset;
         fd.frameId = g_upscale.frame;
-        framegen::RecordFrameData(fd);
+        framegen::RecordFrameData(cl, fd);
     }
     LogEvaluation(f, ok, inW, inH, outputInfo.width, outputInfo.height, jx, jy, g_upscale.frame, reset);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;

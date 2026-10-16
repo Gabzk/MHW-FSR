@@ -35,6 +35,9 @@ struct Config {
 
     // AMD FidelityFX Frame Generation
     bool frameGen = false;
+    bool fgDebugView = false;
+    bool fgDebugTearLines = false;
+    bool showLatencyOsd = true;
 
     // Input conventions, measured for this game (see game.cpp).
     bool depthInverted = true;

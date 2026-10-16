@@ -36,6 +36,7 @@ add_library(MHW-FSR SHARED
   src/ngx_params.cpp
   src/ngx_shim.cpp
   src/probe.cpp
+  src/telemetry.cpp
   src/overlay/overlay.cpp
   src/overlay/imgui/imgui.cpp
   src/overlay/imgui/imgui_draw.cpp
