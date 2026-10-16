@@ -71,9 +71,7 @@ void Start(HMODULE module) {
 
     // Connect Anti-Lag 2 update to game input polling (before input sampling)
     game::SetInputCallback([]() {
-        if (g_config.antiLag2) {
-            antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
-        }
+        antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
     });
 
     if (!ngx::Install(dataDir.wstring(), exe.parent_path().wstring())) {

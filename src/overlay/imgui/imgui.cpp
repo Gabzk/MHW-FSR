@@ -13743,6 +13743,11 @@ static void ImGui::NavUpdateWindowingApplyFocus(ImGuiWindow* apply_focus_window)
 // Gamepad:  Hold Menu/Square (change focus/move/resize), Tap Menu/Square (toggle menu layer)
 static void ImGui::NavUpdateWindowing()
 {
+    return;
+}
+#if 0
+static void ImGui_NavUpdateWindowing_Disabled()
+{
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = g.IO;
 
@@ -13923,6 +13928,7 @@ static void ImGui::NavUpdateWindowing()
         }
     }
 }
+#endif
 
 // Window has already passed the IsWindowNavFocusable()
 static const char* GetFallbackWindowNameForWindowingList(ImGuiWindow* window)

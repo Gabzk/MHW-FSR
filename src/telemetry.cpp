@@ -222,9 +222,8 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
             if (completed > 0 && completed <= g_gpuLatencyFenceVal) {
                 int64_t submitQpc = g_fenceSubmitQpc[completed % g_fenceSubmitQpc.size()];
                 if (submitQpc > 0 && now > submitQpc) {
-                    uint64_t inFlight = g_gpuLatencyFenceVal - completed;
                     float ageMs = static_cast<float>(QpcToMs(now - submitQpc));
-                    gpuQueueMs = std::clamp(ageMs / static_cast<float>(std::max<uint64_t>(1, inFlight + 1)), 0.0f, 100.0f);
+                    gpuQueueMs = std::clamp(ageMs, 0.0f, 100.0f);
                 }
             }
             uint64_t nextFence = ++g_gpuLatencyFenceVal;
