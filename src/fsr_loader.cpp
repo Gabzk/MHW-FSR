@@ -16,7 +16,7 @@ namespace mhwfsr::loader {
 
 namespace {
 HMODULE g_loaderDll = nullptr;
-fs::path g_loaderDllPath;
+fs::path g_targetDir;
 bool g_loadAttempted = false;
 bool g_queried = false;
 std::vector<FsrVersionInfo> g_cachedVersions;
@@ -24,32 +24,28 @@ std::vector<FsrVersionInfo> g_cachedVersions;
 void EnsureLoaded() {
     if (g_loadAttempted) return;
     g_loadAttempted = true;
-    if (g_loaderDllPath.empty()) return;
+    if (g_targetDir.empty()) return;
+
+    SetDllDirectoryW(g_targetDir.wstring().c_str());
 
     std::error_code ec;
-    if (!fs::exists(g_loaderDllPath, ec)) {
-        LOGW("FSR loader DLL not found: {}", g_loaderDllPath.string());
-        return;
-    }
-
-    // Load with altered search path so dependent FidelityFX DLLs in MHW-FSR\ are found
-    // without mutating the process-wide DLL search directory via SetDllDirectoryW.
-    g_loaderDll = LoadLibraryExW(
-        g_loaderDllPath.wstring().c_str(),
-        nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-    );
-    if (!g_loaderDll) {
-        g_loaderDll = LoadLibraryExW(
-            g_loaderDllPath.wstring().c_str(),
-            nullptr,
-            LOAD_WITH_ALTERED_SEARCH_PATH
-        );
-    }
-    if (g_loaderDll) {
-        LOGI("Loaded {}", g_loaderDllPath.string());
-    } else {
-        LOGW("Failed to load {} (error {})", g_loaderDllPath.string(), GetLastError());
+    for (const wchar_t* dllName : {
+             L"amd_fidelityfx_upscaler_dx12.dll",
+             L"amd_fidelityfx_framegeneration_dx12.dll",
+             L"amd_fidelityfx_loader_dx12.dll"
+         }) {
+        fs::path dllPath = g_targetDir / dllName;
+        if (fs::exists(dllPath, ec)) {
+            HMODULE mod = LoadLibraryW(dllPath.wstring().c_str());
+            if (mod) {
+                if (wcscmp(dllName, L"amd_fidelityfx_loader_dx12.dll") == 0) {
+                    g_loaderDll = mod;
+                }
+                LOGI("Loaded {}", dllPath.string());
+            } else {
+                LOGW("Failed to load {} (error {})", dllPath.string(), GetLastError());
+            }
+        }
     }
 }
 
@@ -81,7 +77,8 @@ bool Init(const std::wstring& pluginDir, const std::wstring& customDllPath) {
     std::error_code ec;
     if (fs::exists(targetDir, ec)) {
         LOGI("FSR loader directory: {}", targetDir.string());
-        g_loaderDllPath = targetDir / L"amd_fidelityfx_loader_dx12.dll";
+        g_targetDir = targetDir;
+        EnsureLoaded();
     } else {
         LOGW("FSR loader directory not found: {}", targetDir.string());
     }
