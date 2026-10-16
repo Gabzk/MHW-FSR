@@ -39,8 +39,11 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
 // Shuts down Frame Generation
 void Shutdown();
 
-// Saves HUDLess color buffer from upscaler output (optional)
-void CaptureHudLess(ID3D12GraphicsCommandList* cl, ID3D12Resource* upscaleOutput);
+// Captures the post-tonemapped 3D scene (before 2D HUD rendering) into an internal HUDLess buffer
+void CaptureHudLess(ID3D12GraphicsCommandList* cl, ID3D12Resource* sourceTexture, D3D12_RESOURCE_STATES currentState);
+
+// Returns true if a HUDLess texture was captured during the current frame
+bool HasHudLessForCurrentFrame();
 
 // Mirrors depth/motion on the game command list and records frame parameters for FG Prepare
 void RecordFrameData(ID3D12GraphicsCommandList* cl, const FrameData& data);

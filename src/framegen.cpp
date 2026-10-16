@@ -20,6 +20,7 @@ namespace {
 
 std::recursive_mutex g_mutex;
 ffx::Context g_fgContext{};
+ID3D12Device* g_device = nullptr;
 bool g_ready = false;
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_supported{false};
@@ -28,12 +29,18 @@ std::atomic<bool> g_hasFrameData{false};
 uint32_t g_displayW = 0;
 uint32_t g_displayH = 0;
 DXGI_FORMAT g_format = DXGI_FORMAT_UNKNOWN;
+DXGI_FORMAT g_contextHudLessFormat = DXGI_FORMAT_UNKNOWN;
 uint64_t g_fgFrameId = 0;
 
 d3d::Mirror12 g_depthMirror;
 d3d::Mirror12 g_motionMirror;
 ComPtr<ID3D12Resource> g_realFrameBackup;
+ComPtr<ID3D12Resource> g_hudLessBackupBgra;
+ComPtr<ID3D12Resource> g_hudLessBackupRgba;
 ComPtr<ID3D12Resource> g_interpOutput;
+std::atomic<ID3D12Resource*> g_capturedHudLessRes{nullptr};
+std::atomic<DXGI_FORMAT> g_capturedHudLessFormat{DXGI_FORMAT_UNKNOWN};
+std::atomic<uint64_t> g_hudLessCapturedCount{0};
 FrameData g_frameData{};
 
 DXGI_FORMAT NormalizeFormat(DXGI_FORMAT fmt) {
@@ -55,7 +62,11 @@ DXGI_FORMAT NormalizeFormat(DXGI_FORMAT fmt) {
 
 bool CreateInternalTextures(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format) {
     g_realFrameBackup.Reset();
+    g_hudLessBackupBgra.Reset();
+    g_hudLessBackupRgba.Reset();
     g_interpOutput.Reset();
+    g_capturedHudLessRes.store(nullptr, std::memory_order_relaxed);
+    g_capturedHudLessFormat.store(DXGI_FORMAT_UNKNOWN, std::memory_order_relaxed);
 
     D3D12_HEAP_PROPERTIES heapProps{};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -82,6 +93,22 @@ bool CreateInternalTextures(ID3D12Device* device, uint32_t width, uint32_t heigh
         return false;
     }
 
+    hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                         IID_PPV_ARGS(&g_hudLessBackupBgra));
+    if (FAILED(hr)) {
+        LOGW("FSR FG: failed to create g_hudLessBackupBgra (hr {:#x})", static_cast<uint32_t>(hr));
+    }
+
+    DXGI_FORMAT altFormat = (format == DXGI_FORMAT_B8G8R8A8_UNORM) ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        D3D12_RESOURCE_DESC altDesc = desc;
+        altDesc.Format = altFormat;
+        device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &altDesc,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                        IID_PPV_ARGS(&g_hudLessBackupRgba));
+    }
+
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
                                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
@@ -90,21 +117,72 @@ bool CreateInternalTextures(ID3D12Device* device, uint32_t width, uint32_t heigh
         LOGE("FSR FG: failed to create g_interpOutput UAV ({}x{}, fmt {}, hr {:#x})",
              width, height, static_cast<int>(format), static_cast<uint32_t>(hr));
         g_realFrameBackup.Reset();
+        g_hudLessBackupBgra.Reset();
+        g_hudLessBackupRgba.Reset();
         return false;
     }
 
     return true;
 }
 
+bool CreateFgContextLocked(ID3D12Device* device, uint32_t displayW, uint32_t displayH,
+                           DXGI_FORMAT backBufferFormat, DXGI_FORMAT hudLessFormat) {
+    if (g_fgContext) {
+        ffx::DestroyContext(g_fgContext);
+        g_fgContext = {};
+    }
+
+    uint32_t flags = 0;
+    if (backBufferFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || backBufferFormat == DXGI_FORMAT_R10G10B10A2_UNORM ||
+        backBufferFormat == DXGI_FORMAT_R11G11B10_FLOAT) {
+        flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
+    }
+    if (g_config.depthInverted) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED;
+    if (g_config.depthInfinite) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+    if (g_config.mvJittered) flags |= FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+
+    ffx::CreateContextDescFrameGeneration fgDesc{};
+    fgDesc.flags = flags;
+    fgDesc.displaySize = { displayW, displayH };
+    fgDesc.maxRenderSize = { displayW, displayH };
+    fgDesc.backBufferFormat = ffxApiGetSurfaceFormatDX12(backBufferFormat);
+
+    ffx::CreateContextDescFrameGenerationHudless hudlessDesc{};
+    hudlessDesc.hudlessBackBufferFormat = ffxApiGetSurfaceFormatDX12(hudLessFormat);
+
+    ffx::CreateContextDescFrameGenerationVersion versionDesc{};
+    versionDesc.version = FFX_FRAMEGENERATION_VERSION;
+
+    ffx::CreateBackendDX12Desc backendDesc{};
+    backendDesc.device = device;
+
+    ffx::ReturnCode rc = ffx::CreateContext(g_fgContext, nullptr, fgDesc, hudlessDesc, backendDesc, versionDesc);
+    if (!rc) {
+        LOGE("FSR Frame Generation CreateContext failed (code {:#x}, bbFmt={}, hudLessFmt={})",
+             static_cast<uint32_t>(rc), static_cast<int>(backBufferFormat), static_cast<int>(hudLessFormat));
+        return false;
+    }
+
+    g_contextHudLessFormat = hudLessFormat;
+    g_fgFrameId = 0;
+    return true;
+}
+
 void ShutdownLocked() {
     g_hasFrameData.store(false);
+    g_capturedHudLessRes.store(nullptr, std::memory_order_relaxed);
+    g_capturedHudLessFormat.store(DXGI_FORMAT_UNKNOWN, std::memory_order_relaxed);
     g_depthMirror.Reset();
     g_motionMirror.Reset();
     d3d::Retire(std::move(g_realFrameBackup));
+    d3d::Retire(std::move(g_hudLessBackupBgra));
+    d3d::Retire(std::move(g_hudLessBackupRgba));
     d3d::Retire(std::move(g_interpOutput));
     if (g_ready) {
-        ffx::DestroyContext(g_fgContext);
-        g_fgContext = {};
+        if (g_fgContext) {
+            ffx::DestroyContext(g_fgContext);
+            g_fgContext = {};
+        }
         g_ready = false;
         LOGI("AMD FidelityFX Frame Generation shutdown");
     }
@@ -148,39 +226,18 @@ bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMA
         return false;
     }
 
-    uint32_t flags = 0;
-    if (normFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || normFormat == DXGI_FORMAT_R10G10B10A2_UNORM ||
-        normFormat == DXGI_FORMAT_R11G11B10_FLOAT) {
-        flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
-    }
-    if (g_config.depthInverted) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED;
-    if (g_config.depthInfinite) flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
-    if (g_config.mvJittered) flags |= FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
-
-    ffx::CreateContextDescFrameGeneration fgDesc{};
-    fgDesc.flags = flags;
-    fgDesc.displaySize = { displayW, displayH };
-    fgDesc.maxRenderSize = { displayW, displayH };
-    fgDesc.backBufferFormat = ffxApiGetSurfaceFormatDX12(normFormat);
-
-    ffx::CreateContextDescFrameGenerationVersion versionDesc{};
-    versionDesc.version = FFX_FRAMEGENERATION_VERSION;
-
-    ffx::CreateBackendDX12Desc backendDesc{};
-    backendDesc.device = device;
-
-    ffx::ReturnCode rc = ffx::CreateContext(g_fgContext, nullptr, fgDesc, backendDesc, versionDesc);
-    if (!rc) {
-        LOGE("FSR Frame Generation CreateContext failed (code {:#x})", static_cast<uint32_t>(rc));
+    if (!CreateFgContextLocked(device, displayW, displayH, normFormat, normFormat)) {
         g_realFrameBackup.Reset();
+        g_hudLessBackupBgra.Reset();
+        g_hudLessBackupRgba.Reset();
         g_interpOutput.Reset();
         return false;
     }
 
+    g_device = device;
     g_displayW = displayW;
     g_displayH = displayH;
     g_format = normFormat;
-    g_fgFrameId = 0;
     g_hasFrameData.store(false);
     g_ready = true;
 
@@ -194,9 +251,53 @@ void Shutdown() {
     ShutdownLocked();
 }
 
-void CaptureHudLess(ID3D12GraphicsCommandList* /*cl*/, ID3D12Resource* /*upscaleOutput*/) {
-    // FSR FG uses the post-tonemapped backbuffer directly as interpolation source so HDR/SDR
-    // color spaces match the swapchain backbuffer 1:1.
+void CaptureHudLess(ID3D12GraphicsCommandList* cl, ID3D12Resource* sourceTexture, D3D12_RESOURCE_STATES currentState) {
+    if (!IsActive() || !cl || !sourceTexture) return;
+
+    D3D12_RESOURCE_DESC srcDesc = sourceTexture->GetDesc();
+    if (srcDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        srcDesc.Width != g_displayW || srcDesc.Height != g_displayH) {
+        return;
+    }
+
+    DXGI_FORMAT normSrcFmt = NormalizeFormat(srcDesc.Format);
+    ID3D12Resource* dst = nullptr;
+    if (normSrcFmt == g_format && g_hudLessBackupBgra) {
+        dst = g_hudLessBackupBgra.Get();
+    } else if ((normSrcFmt == DXGI_FORMAT_R8G8B8A8_UNORM || normSrcFmt == DXGI_FORMAT_B8G8R8A8_UNORM) && g_hudLessBackupRgba) {
+        dst = g_hudLessBackupRgba.Get();
+    } else {
+        return;
+    }
+
+    d3d::BarrierBatcher batcher(cl);
+    if (currentState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        batcher.Transition(sourceTexture, currentState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
+    batcher.Transition(dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    batcher.Flush();
+
+    cl->CopyResource(dst, sourceTexture);
+
+    batcher.Transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (currentState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        batcher.Transition(sourceTexture, D3D12_RESOURCE_STATE_COPY_SOURCE, currentState);
+    }
+    batcher.Flush();
+
+    g_capturedHudLessFormat.store(normSrcFmt, std::memory_order_release);
+    g_capturedHudLessRes.store(dst, std::memory_order_release);
+
+    uint64_t count = g_hudLessCapturedCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 5) {
+        LOGI("FSR FG: captured HUDLessColor #{} from {} ({}x{}, srcFmt={}, normFmt={}, state={:#x})",
+             count, static_cast<void*>(sourceTexture), srcDesc.Width, srcDesc.Height,
+             static_cast<int>(srcDesc.Format), static_cast<int>(normSrcFmt), static_cast<uint32_t>(currentState));
+    }
+}
+
+bool HasHudLessForCurrentFrame() {
+    return g_capturedHudLessRes.load(std::memory_order_acquire) != nullptr;
 }
 
 void RecordFrameData(ID3D12GraphicsCommandList* cl, const FrameData& data) {
@@ -229,6 +330,9 @@ bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* cu
     }
 
     std::lock_guard lock(g_mutex);
+    ID3D12Resource* hudLessRes = g_capturedHudLessRes.exchange(nullptr, std::memory_order_acq_rel);
+    DXGI_FORMAT hudLessFmt = g_capturedHudLessFormat.load(std::memory_order_acquire);
+
     if (!g_hasFrameData.exchange(false) || !g_frameData.depth || !g_frameData.motion ||
         !g_realFrameBackup || !g_interpOutput) {
         return false;
@@ -238,6 +342,16 @@ bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* cu
     D3D12_RESOURCE_DESC bbDesc = currentBackBuffer->GetDesc();
     if (bbDesc.Width != g_displayW || bbDesc.Height != g_displayH) {
         return false;
+    }
+
+    // Ensure FG context hudlessBackBufferFormat matches the active interpolation source format
+    DXGI_FORMAT targetHudLessFmt = (hudLessRes && hudLessFmt != DXGI_FORMAT_UNKNOWN) ? hudLessFmt : g_format;
+    if (targetHudLessFmt != g_contextHudLessFormat && g_device) {
+        LOGI("FSR FG: recreating context for HUDLess format {} (backbuffer format {})",
+             static_cast<int>(targetHudLessFmt), static_cast<int>(g_format));
+        if (!CreateFgContextLocked(g_device, g_displayW, g_displayH, g_format, targetHudLessFmt)) {
+            return false;
+        }
     }
 
     // 1. Copy currentBackBuffer (Real Frame N in PRESENT state) -> g_realFrameBackup
@@ -265,7 +379,11 @@ bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* cu
     configDesc.frameGenerationCallbackUserContext = nullptr;
     configDesc.frameGenerationEnabled = true;
     configDesc.allowAsyncWorkloads = false;
-    configDesc.HUDLessColor = FfxApiResource({});
+    if (hudLessRes) {
+        configDesc.HUDLessColor = ffxApiGetResourceDX12(hudLessRes, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    } else {
+        configDesc.HUDLessColor = FfxApiResource({});
+    }
     configDesc.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
     if (g_config.fgDebugView) {
         configDesc.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;

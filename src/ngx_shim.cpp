@@ -398,7 +398,6 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     bool ok = f.fsr.Dispatch(dp);
     telemetry::EndUpscalePass(cl);
     if (ok) {
-        framegen::CaptureHudLess(cl, output);
         framegen::FrameData fd{};
         fd.depth = depth;
         fd.motion = motion;
@@ -514,7 +513,6 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
     bool ok = f.fsr.Dispatch(dp);
     telemetry::EndUpscalePass(cl);
     if (ok) {
-        framegen::CaptureHudLess(cl, output);
         framegen::FrameData fd{};
         fd.depth = g_upscale.depth;
         fd.motion = g_upscale.motion;
