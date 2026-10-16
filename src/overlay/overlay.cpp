@@ -781,11 +781,11 @@ void RenderMainWindow() {
                 ImGui::BeginChild("ProfilerBox", ImVec2(0, 195), true);
                 {
                     ImGui::Text("Upscaler Pass (%s):", ActiveFsrVersion().c_str());
-                    ImGui::SameLine(260);
+                    ImGui::SameLine(280);
                     ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "%.2f ms (GPU)  /  %.2f ms (CPU)", m.upscaleGpuMs, m.upscaleCpuMs);
 
                     ImGui::Text("Frame Generation Pass (FSR FG):");
-                    ImGui::SameLine(260);
+                    ImGui::SameLine(280);
                     if (fgActive) {
                         ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.2f ms (GPU)  /  %.2f ms (CPU)", m.fgGpuMs, m.fgCpuMs);
                     } else {
@@ -793,7 +793,7 @@ void RenderMainWindow() {
                     }
 
                     ImGui::Text("FG Frame Pacing Delay:");
-                    ImGui::SameLine(260);
+                    ImGui::SameLine(280);
                     if (fgActive) {
                         ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.2f ms", m.fgPaceDelayMs);
                     } else {
@@ -801,7 +801,7 @@ void RenderMainWindow() {
                     }
 
                     ImGui::Text("Anti-Lag 2 CPU Pacing Delay:");
-                    ImGui::SameLine(260);
+                    ImGui::SameLine(280);
                     if (antilag::IsActive()) {
                         ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f), "%.2f ms (amdxc64 sync)", m.antiLagWaitMs);
                     } else {
@@ -809,11 +809,11 @@ void RenderMainWindow() {
                     }
 
                     ImGui::Text("GPU Render Queue Latency:");
-                    ImGui::SameLine(260);
+                    ImGui::SameLine(280);
                     ImGui::Text("%.2f ms", m.gpuQueueLatencyMs);
 
-                    ImGui::Text("Input-to-Present Latency (PC Latency):");
-                    ImGui::SameLine(260);
+                    ImGui::Text("PC Latency (Input-to-Present):");
+                    ImGui::SameLine(280);
                     ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%.1f ms", m.inputToPresentMs);
 
                     ImGui::Separator();
