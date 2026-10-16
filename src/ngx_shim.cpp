@@ -736,7 +736,7 @@ void** FindGetProcAddressSlot(HMODULE exe) {
             auto** slot = reinterpret_cast<void**>(mem::RipTarget(code + i + 2, code + i + 6));
             if (rdata && (reinterpret_cast<uint8_t*>(slot) < rdata->begin || reinterpret_cast<uint8_t*>(slot) >= rdata->end)) continue;
             void* value = mem::SafeRead<void*>(slot).value_or(nullptr);
-            if (value && (value == real[0] || value == real[1] || value == real[2] || rdata)) return slot;
+            if (value && (value == real[0] || value == real[1] || value == real[2])) return slot;
         }
     }
     return nullptr;

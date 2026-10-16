@@ -88,7 +88,6 @@ WNDPROC g_origWndProc = nullptr;
 std::atomic<bool> g_hooked{false};
 bool g_initialized = false;
 bool g_showMenu = false;
-bool g_showOsd = true;
 std::string g_saveFeedback;
 std::chrono::steady_clock::time_point g_saveFeedbackTime;
 std::recursive_mutex g_mutex;
@@ -383,8 +382,6 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = nullptr; // Avoid cluttering game folder with imgui.ini
 
     ApplyTheme();
@@ -414,7 +411,14 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
 
     auto versions = loader::QueryVersions(g_device.Get());
     if (!versions.empty()) {
+        uint64_t targetId = loader::ResolveVersionId(g_device.Get(), g_config.version);
         std::string initialVer = versions[0].name;
+        for (const auto& v : versions) {
+            if (targetId != 0 && v.id == targetId) {
+                initialVer = v.name;
+                break;
+            }
+        }
         if (initialVer.find("FSR") == std::string::npos && initialVer.find("fsr") == std::string::npos) {
             initialVer = "FSR " + initialVer;
         }
@@ -426,7 +430,7 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
 }
 
 void RenderOsdBadge() {
-    if (!g_showOsd) return;
+    if (!g_config.showOsd) return;
 
     bool dlssOn = game::DlssEnabledInGame();
     float scale = game::RenderScale();
@@ -440,7 +444,9 @@ void RenderOsdBadge() {
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNavFocus |
+                             ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     if (ImGui::Begin("##MhwFsrOsd", nullptr, flags)) {
         if (dlssOn) {
@@ -453,18 +459,21 @@ void RenderOsdBadge() {
         ImGui::TextDisabled("|");
         ImGui::SameLine();
         ImGui::Text("%s (%.0f%%)", modeName, scale * 100.0f);
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
 
-        float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
-        float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
-        float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+        if (g_config.showFps) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
 
-        if (fgActive && dispFps > baseFps * 1.25f) {
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.0f -> %.0f FPS (%.1fms)", baseFps, dispFps, dispDt);
-        } else {
-            ImGui::Text("%.0f FPS (%.1fms)", dispFps, dispDt);
+            float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
+            float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
+            float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+
+            if (fgActive && dispFps > baseFps * 1.25f) {
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.0f -> %.0f FPS (%.1fms)", baseFps, dispFps, dispDt);
+            } else {
+                ImGui::Text("%.0f FPS (%.1fms)", dispFps, dispDt);
+            }
         }
 
         if (al2Active) {
@@ -518,7 +527,7 @@ void RenderMainWindow() {
     if (!g_showMenu) return;
 
     ImGui::SetNextWindowSize(ImVec2(590.0f, 560.0f), ImGuiCond_FirstUseEver);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavFocus;
 
     if (ImGui::Begin("MHW-FSR :: AMD FidelityFX Control Center", &g_showMenu, flags)) {
         bool dlssOn = game::DlssEnabledInGame();
@@ -612,6 +621,15 @@ void RenderMainWindow() {
                 if (ImGui::Button("Moderate (0.66)")) { g_config.sharpness = 0.66f; game::ApplyConfig(g_config); }
                 ImGui::SameLine();
                 if (ImGui::Button("Crisp (1.0)")) { g_config.sharpness = 1.0f; game::ApplyConfig(g_config); }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "ON-SCREEN DISPLAY (OSD)");
+                ImGui::Checkbox("Show Corner Overlay (OSD)", &g_config.showOsd);
+                ImGui::SameLine();
+                ImGui::Checkbox("Show FPS Counter", &g_config.showFps);
 
                 ImGui::EndTabItem();
             }
@@ -812,9 +830,11 @@ void RenderMainWindow() {
 
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "OVERLAY & VISUAL COMPARISON");
-                ImGui::Checkbox("Show Corner Watermark (OSD)", &g_showOsd);
+                ImGui::Checkbox("Show Corner Watermark (OSD)", &g_config.showOsd);
                 ImGui::SameLine();
-                ImGui::Checkbox("Show Latency Breakdown in OSD", &g_config.showLatencyOsd);
+                ImGui::Checkbox("Show FPS Counter", &g_config.showFps);
+                ImGui::SameLine();
+                ImGui::Checkbox("Show Latency Breakdown", &g_config.showLatencyOsd);
 
                 if (ImGui::Checkbox("Bypass FSR (Show Vanilla Capcom TAA)", &g_config.bypass)) {
                     game::ApplyConfig(g_config);
@@ -950,10 +970,15 @@ HRESULT PresentWithOverlayAndFg(IDXGISwapChain3* swapChain, UINT syncInterval, U
 
     telemetry::OnRealFramePresent(cmdQueue);
 
-    bool drawUi = (g_showMenu || g_showOsd);
+    bool drawUi = (g_showMenu || g_config.showOsd);
     if (drawUi) {
         ImGuiIO& io = ImGui::GetIO();
         io.MouseDrawCursor = g_showMenu;
+        if (g_showMenu) {
+            io.ConfigFlags |= (ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad);
+        } else {
+            io.ConfigFlags &= ~(ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad);
+        }
 
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();

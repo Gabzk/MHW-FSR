@@ -99,14 +99,26 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
     backendDesc.device = device;
 
     ffx::ReturnCode rc;
-    if (settings.versionId != 0) {
+    uint64_t activeVersionId = settings.versionId;
+    if (activeVersionId != 0) {
         ffx::CreateContextDescOverrideVersion overrideDesc{};
-        overrideDesc.versionId = settings.versionId;
+        overrideDesc.versionId = activeVersionId;
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc, overrideDesc);
         if (!rc) {
-            LOGW("FSR CreateContext with override {:#x} failed (code {:#x}), falling back to default provider",
-                 settings.versionId, static_cast<uint32_t>(rc));
-            rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
+            uint64_t fsr3Id = loader::ResolveVersionId(device, "FSR 3.1");
+            if (fsr3Id != 0 && fsr3Id != activeVersionId) {
+                LOGW("FSR CreateContext with override {:#x} failed (code {:#x}), falling back to FSR 3.1 ({:#x})",
+                     activeVersionId, static_cast<uint32_t>(rc), fsr3Id);
+                activeVersionId = fsr3Id;
+                overrideDesc.versionId = activeVersionId;
+                rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc, overrideDesc);
+            }
+            if (!rc) {
+                LOGW("FSR CreateContext with override {:#x} failed (code {:#x}), falling back to default provider",
+                     activeVersionId, static_cast<uint32_t>(rc));
+                activeVersionId = 0;
+                rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
+            }
         }
     } else {
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
@@ -131,7 +143,7 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
     } else {
         auto versions = loader::QueryVersions(device);
         for (const auto& v : versions) {
-            if (settings.versionId != 0 && v.id == settings.versionId) {
+            if (activeVersionId != 0 && v.id == activeVersionId) {
                 activeVer = v.name;
                 break;
             }
@@ -149,7 +161,7 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
 
     LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x}, version {:#x} ({})",
          settings.renderW, settings.renderH, settings.upscaleW, settings.upscaleH,
-         settings.flags, settings.versionId, ActiveFsrVersion());
+         settings.flags, activeVersionId, ActiveFsrVersion());
     return true;
 }
 

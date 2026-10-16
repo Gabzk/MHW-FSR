@@ -16,9 +16,59 @@ namespace mhwfsr::loader {
 
 namespace {
 HMODULE g_loaderDll = nullptr;
+fs::path g_loaderDllPath;
+bool g_loadAttempted = false;
 bool g_queried = false;
 std::vector<FsrVersionInfo> g_cachedVersions;
+
+void EnsureLoaded() {
+    if (g_loadAttempted) return;
+    g_loadAttempted = true;
+    if (g_loaderDllPath.empty()) return;
+
+    std::error_code ec;
+    if (!fs::exists(g_loaderDllPath, ec)) {
+        LOGW("FSR loader DLL not found: {}", g_loaderDllPath.string());
+        return;
+    }
+
+    // Load with altered search path so dependent FidelityFX DLLs in MHW-FSR\ are found
+    // without mutating the process-wide DLL search directory via SetDllDirectoryW.
+    g_loaderDll = LoadLibraryExW(
+        g_loaderDllPath.wstring().c_str(),
+        nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    );
+    if (!g_loaderDll) {
+        g_loaderDll = LoadLibraryExW(
+            g_loaderDllPath.wstring().c_str(),
+            nullptr,
+            LOAD_WITH_ALTERED_SEARCH_PATH
+        );
+    }
+    if (g_loaderDll) {
+        LOGI("Loaded {}", g_loaderDllPath.string());
+    } else {
+        LOGW("Failed to load {} (error {})", g_loaderDllPath.string(), GetLastError());
+    }
 }
+
+// Extracts the major semantic version digit from a provider name (e.g. "4.1.1" -> 4, "FSR 3.1.5" -> 3, "2.3.4" -> 2).
+int GetMajorVersion(std::string_view name) {
+    for (size_t i = 0; i < name.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(name[i]);
+        if (std::isdigit(c)) {
+            int val = 0;
+            while (i < name.size() && std::isdigit(static_cast<unsigned char>(name[i]))) {
+                val = val * 10 + (name[i] - '0');
+                ++i;
+            }
+            return val;
+        }
+    }
+    return 0;
+}
+}  // namespace
 
 bool Init(const std::wstring& pluginDir, const std::wstring& customDllPath) {
     fs::path targetDir;
@@ -31,16 +81,7 @@ bool Init(const std::wstring& pluginDir, const std::wstring& customDllPath) {
     std::error_code ec;
     if (fs::exists(targetDir, ec)) {
         LOGI("FSR loader directory: {}", targetDir.string());
-        SetDllDirectoryW(targetDir.wstring().c_str());
-        fs::path loaderDllPath = targetDir / L"amd_fidelityfx_loader_dx12.dll";
-        if (fs::exists(loaderDllPath, ec)) {
-            g_loaderDll = LoadLibraryW(loaderDllPath.wstring().c_str());
-            if (g_loaderDll) {
-                LOGI("Loaded {}", loaderDllPath.string());
-            } else {
-                LOGW("Failed to pre-load {} (error {})", loaderDllPath.string(), GetLastError());
-            }
-        }
+        g_loaderDllPath = targetDir / L"amd_fidelityfx_loader_dx12.dll";
     } else {
         LOGW("FSR loader directory not found: {}", targetDir.string());
     }
@@ -50,6 +91,8 @@ bool Init(const std::wstring& pluginDir, const std::wstring& customDllPath) {
 std::vector<FsrVersionInfo> QueryVersions(ID3D12Device* device) {
     if (g_queried) return g_cachedVersions;
     if (!device) return {};
+
+    EnsureLoaded();
 
     uint64_t count = 0;
     ffx::QueryDescGetVersions q{};
@@ -88,13 +131,14 @@ bool HasFsr4Support(ID3D12Device* device) {
     if (!device) return false;
     auto versions = QueryVersions(device);
     for (const auto& v : versions) {
-        if (v.name.find("4") != std::string::npos) return true;
+        if (GetMajorVersion(v.name) == 4) return true;
     }
     return false;
 }
 
 bool HasFrameGenSupport(ID3D12Device* device) {
     if (!device) return false;
+    EnsureLoaded();
     uint64_t count = 0;
     ffx::QueryDescGetVersions q{};
     q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
@@ -108,9 +152,6 @@ bool HasFrameGenSupport(ID3D12Device* device) {
 uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
     if (!device) return 0;
     auto versions = QueryVersions(device);
-
-    if (versionStr.empty()) return 0;
-
     if (versions.empty()) return 0;
 
     static std::string s_lastLoggedVersionStr;
@@ -136,17 +177,24 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
         return out;
     };
 
-    std::string s = versionStr;
+    std::string s = versionStr.empty() ? "auto" : versionStr;
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)::tolower(c); });
     if (s == "auto" || s == "default") {
+        // 1. Prefer FSR 4.x (major version == 4) if supported by the GPU/driver
         for (const auto& v : versions) {
-            std::string vNorm = normalize(v.name);
-            if (vNorm.find("4") != std::string::npos || vNorm.find("fsr4") != std::string::npos) {
+            if (GetMajorVersion(v.name) == 4) {
                 LogOverride(v.name + " (Auto-detected)", v.id);
                 return v.id;
             }
         }
-        return 0;
+        // 2. Otherwise explicitly pick FSR 3.x (major version == 3, e.g. 3.1.5) so we never fall into 2.3.4
+        for (const auto& v : versions) {
+            if (GetMajorVersion(v.name) == 3) {
+                LogOverride(v.name + " (Auto-detected)", v.id);
+                return v.id;
+            }
+        }
+        return versions[0].id;
     }
 
     if (s.rfind("0x", 0) == 0) {
@@ -159,32 +207,32 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
 
     std::string sNorm = normalize(s);
 
-    // 1. Direct substring match
+    // Check explicit major version requests ("FSR 4", "4.1", "FSR 3.1", "3.1.5", etc.)
+    int requestedMajor = GetMajorVersion(s);
+    if (requestedMajor == 4 || requestedMajor == 3 || requestedMajor == 2) {
+        for (const auto& v : versions) {
+            if (GetMajorVersion(v.name) == requestedMajor) {
+                LogOverride(v.name, v.id);
+                return v.id;
+            }
+        }
+        // If user forced FSR 4 on a non-FSR4 GPU, fall back cleanly to FSR 3.x (never 2.3.4)
+        if (requestedMajor == 4) {
+            for (const auto& v : versions) {
+                if (GetMajorVersion(v.name) == 3) {
+                    LogOverride(v.name + " (Fallback from FSR 4)", v.id);
+                    return v.id;
+                }
+            }
+        }
+    }
+
+    // Direct substring / normalized match
     for (const auto& v : versions) {
         std::string vNameLower = v.name;
         std::transform(vNameLower.begin(), vNameLower.end(), vNameLower.begin(),
                        [](unsigned char c) { return (char)::tolower(c); });
-        if (vNameLower.find(s) != std::string::npos) {
-            LogOverride(v.name, v.id);
-            return v.id;
-        }
-    }
-
-    // 2. Normalized alphanumeric match (handles "fsr4", "fsr 4", "fsr3", etc.)
-    for (const auto& v : versions) {
-        std::string vNorm = normalize(v.name);
-        if (vNorm.find(sNorm) != std::string::npos || sNorm.find(vNorm) != std::string::npos) {
-            LogOverride(v.name, v.id);
-            return v.id;
-        }
-        // Also check if user specified "4" and name contains "4", or user specified "3" and name contains "3"
-        if ((sNorm == "4" || sNorm == "fsr4" || sNorm == "41" || sNorm == "fsr41") &&
-            (vNorm.find("4") != std::string::npos || vNorm.find("fsr4") != std::string::npos)) {
-            LogOverride(v.name, v.id);
-            return v.id;
-        }
-        if ((sNorm == "3" || sNorm == "fsr3" || sNorm == "31" || sNorm == "fsr31") &&
-            (vNorm.find("3") != std::string::npos || vNorm.find("fsr3") != std::string::npos)) {
+        if (vNameLower.find(s) != std::string::npos || normalize(v.name).find(sNorm) != std::string::npos) {
             LogOverride(v.name, v.id);
             return v.id;
         }
@@ -194,7 +242,10 @@ uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {
         s_lastLoggedVersionStr = versionStr;
         s_lastLoggedId = 0;
         s_hasLogged = true;
-        LOGW("Could not match FSR version '{}', using default", versionStr);
+        LOGW("Could not match FSR version '{}', using FSR 3.x fallback", versionStr);
+    }
+    for (const auto& v : versions) {
+        if (GetMajorVersion(v.name) == 3) return v.id;
     }
     return 0;
 }

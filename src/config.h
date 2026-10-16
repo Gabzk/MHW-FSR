@@ -33,11 +33,13 @@ struct Config {
     bool antiLag2 = true;
     int antiLagMaxFps = 0;  // 0 = unlimited
 
-    // AMD FidelityFX Frame Generation
+    // AMD FidelityFX Frame Generation & OSD
     bool frameGen = false;
     bool fgDebugView = false;
     bool fgDebugTearLines = false;
-    bool showLatencyOsd = true;
+    bool showOsd = true;
+    bool showFps = true;
+    bool showLatencyOsd = false;
 
     // Input conventions, measured for this game (see game.cpp).
     bool depthInverted = true;

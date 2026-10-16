@@ -25,6 +25,15 @@ constexpr wchar_t kDefaultIni[] =
     L"; Enabled: 1 = Plugin enabled, 0 = Disabled completely (requires game restart).\n"
     L"Enabled=1\n"
     L"\n"
+    L"; ShowOSD: 1 = Show the top-left corner overlay (OSD) on startup, 0 = Hidden by default.\n"
+    L"ShowOSD=1\n"
+    L"\n"
+    L"; ShowFPS: 1 = Show the FPS & frametime counter inside the OSD, 0 = Hide FPS counter.\n"
+    L"ShowFPS=1\n"
+    L"\n"
+    L"; ShowLatencyOSD: 1 = Show detailed GPU/CPU latency breakdown in OSD, 0 = Compact OSD.\n"
+    L"ShowLatencyOSD=0\n"
+    L"\n"
     L"; LogLevel: Detail level written to nativePC\\plugins\\MHW-FSR.log\n"
     L"; Options: Debug, Info, Warn, Error.\n"
     L"; (Use 'Debug' to log per-frame render resolutions and full diagnostics).\n"
@@ -219,6 +228,9 @@ void LoadConfig(const std::wstring& ini) {
 
     Config c;
     c.enabled = ReadBool(ini, L"General", L"Enabled", c.enabled);
+    c.showOsd = ReadBool(ini, L"General", L"ShowOSD", c.showOsd);
+    c.showFps = ReadBool(ini, L"General", L"ShowFPS", c.showFps);
+    c.showLatencyOsd = ReadBool(ini, L"General", L"ShowLatencyOSD", c.showLatencyOsd);
 
     auto level = Lower(ReadString(ini, L"General", L"LogLevel", L"info"));
     if (level == L"debug") c.logLevel = LogLevel::Debug;
@@ -258,7 +270,6 @@ void LoadConfig(const std::wstring& ini) {
     c.frameGen = ReadBool(ini, L"FrameGeneration", L"FrameGen", c.frameGen);
     c.fgDebugView = ReadBool(ini, L"FrameGeneration", L"DebugView", c.fgDebugView);
     c.fgDebugTearLines = ReadBool(ini, L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
-    c.showLatencyOsd = ReadBool(ini, L"General", L"ShowLatencyOSD", c.showLatencyOsd);
 
     // [Advanced]
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
@@ -332,6 +343,9 @@ void SaveConfig(const Config& c) {
         writeStr(sec, key, buf);
     };
 
+    writeBool(L"General", L"ShowOSD", c.showOsd);
+    writeBool(L"General", L"ShowFPS", c.showFps);
+    writeBool(L"General", L"ShowLatencyOSD", c.showLatencyOsd);
     writeStr(L"FSR", L"QualityPreset", Widen(QualityModeName(c.mode)));
     writeFloat(L"FSR", L"RenderScale", c.customScale);
     writeFloat(L"FSR", L"Sharpness", c.sharpness);
@@ -343,7 +357,6 @@ void SaveConfig(const Config& c) {
     writeBool(L"FrameGeneration", L"FrameGen", c.frameGen);
     writeBool(L"FrameGeneration", L"DebugView", c.fgDebugView);
     writeBool(L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
-    writeBool(L"General", L"ShowLatencyOSD", c.showLatencyOsd);
     g_iniTime = LastWrite(g_iniPath);
 }
 
