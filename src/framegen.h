@@ -2,13 +2,9 @@
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
-#include <wrl/client.h>
 #include <cstdint>
-#include <string>
 
 namespace mhwfsr::framegen {
-
-using Microsoft::WRL::ComPtr;
 
 struct FrameData {
     ID3D12Resource* depth = nullptr;
@@ -33,36 +29,18 @@ struct FrameData {
     uint64_t frameId = 0;
 };
 
-// Initializes the Frame Generation context and internal backbuffer textures
-bool Init(ID3D12Device* device, uint32_t displayW, uint32_t displayH, DXGI_FORMAT backBufferFormat);
-
-// Shuts down Frame Generation
-void Shutdown();
-
-// Captures the post-tonemapped 3D scene (before 2D HUD rendering) into an internal HUDLess buffer
-void CaptureHudLess(ID3D12GraphicsCommandList* cl, ID3D12Resource* sourceTexture, D3D12_RESOURCE_STATES currentState);
-
-// Returns true if a HUDLess texture was captured during the current frame
-bool HasHudLessForCurrentFrame();
-
-// Mirrors depth/motion on the game command list and records frame parameters for FG Prepare
-void RecordFrameData(ID3D12GraphicsCommandList* cl, const FrameData& data);
-
-// Returns true if FrameGen is active and a valid frame's depth/motion were recorded this frame
-bool HasPendingFrame();
-
-// Backs up currentBackBuffer (real frame), dispatches FSR FG Prepare + Generate, and writes the
-// interpolated frame into currentBackBuffer (leaving currentBackBuffer in PRESENT state)
-bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList* cl, ID3D12Resource* currentBackBuffer);
-
-// Copies the backed-up real frame into targetBackBuffer (leaving targetBackBuffer in PRESENT state)
-bool CopyRealFrameToBackBuffer(ID3D12GraphicsCommandList* cl, ID3D12Resource* targetBackBuffer);
-
-// Status queries and controls
-bool CheckSupport(ID3D12Device* device);
-bool IsSupported();
-bool IsActive();
-void SetEnabled(bool enabled);
-bool IsEnabled();
+inline bool Init(ID3D12Device*, uint32_t, uint32_t, DXGI_FORMAT) { return false; }
+inline void Shutdown() {}
+inline void CaptureHudLess(ID3D12GraphicsCommandList*, ID3D12Resource*, D3D12_RESOURCE_STATES) {}
+inline bool HasHudLessForCurrentFrame() { return false; }
+inline void RecordFrameData(ID3D12GraphicsCommandList*, const FrameData&) {}
+inline bool HasPendingFrame() { return false; }
+inline bool GenerateInterpolatedFrame(ID3D12GraphicsCommandList*, ID3D12Resource*) { return false; }
+inline bool CopyRealFrameToBackBuffer(ID3D12GraphicsCommandList*, ID3D12Resource*) { return false; }
+inline bool CheckSupport(ID3D12Device*) { return false; }
+inline bool IsSupported() { return false; }
+inline bool IsActive() { return false; }
+inline void SetEnabled(bool) {}
+inline bool IsEnabled() { return false; }
 
 }  // namespace mhwfsr::framegen
