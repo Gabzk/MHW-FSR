@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-10-16
+
+### Added
+- **AMD FidelityFX Anti-Lag 2 SDK Integration**:
+  - Full native driver-level integration of AMD FidelityFX Anti-Lag 2 (`amdxc64.dll`).
+  - Drastically minimizes click-to-photon and input-to-present latency on AMD Radeon GPUs (tested drop from ~172 ms down to ~32 ms).
+  - Added in-game toggle under the new **Anti-Lag 2 & Latency** tab.
+  - Added integrated **Driver Frame Pacing** slider (Driver Max FPS limiter) to prevent GPU queue bloat without external frame limiters.
+- **OptiScaler-Style Latency & Performance Profiler**:
+  - Added dedicated hardware and CPU telemetry profiler under the **Diagnostics & Profiler** tab:
+    - **Upscaler Pass Latency**: Real-time GPU execution time (via D3D12 hardware timestamp queries) and CPU command recording time.
+    - **Anti-Lag 2 CPU Synchronization Wait**: Exact milliseconds spent synchronizing CPU input with GPU dispatch.
+    - **GPU Render Queue Latency**: In-flight queue latency between CPU submit and GPU execution completion.
+    - **PC Latency (Input-to-Present)**: End-to-end latency from mouse/controller input poll to frame presentation.
+    - **Interactive Frame Time Plot**: Real-time smoothed frametime history graph with live FPS and frametime readout.
+  - Added optional **Latency Breakdown OSD** displaying Upscale, AL2 Wait, and PC Latency directly on screen.
+
+### Fixed
+- **ROG Ally & non-FSR4 GPU Auto-Fallback**:
+  - Implemented semantic major version parser (`GetMajorVersion`) in the FSR loader.
+  - Fixed an issue where handhelds like ROG Ally or GPUs lacking DirectML FSR 4.1.1 support would falsely match the `.4` suffix of `"2.3.4"` in `Auto` mode.
+  - Hardware without FSR 4 now strictly falls back to high-quality **FSR 3.1.5**, never reverting to FSR 2.3.4.
+- **Steam Cloud & Save File Loading**:
+  - Fixed an accidental `.rdata` pointer overwrite in `FindGetProcAddressSlot` during early NGX shim initialization that previously interfered with Steam Cloud sync and save data loading.
+- **OSD & FPS Counter Configuration Persistence**:
+  - Added `ShowOSD`, `ShowFPS`, and `ShowLatencyOSD` settings under `[General]` in `MHW-FSR.ini`.
+  - User preferences for displaying the corner OSD badge and FPS counter are now correctly saved and restored across game sessions.
+- **Controller X / Square Black Box Highlight**:
+  - Fixed Dear ImGui gamepad navigation (`NavUpdateWindowing`) drawing a dark highlight box over the corner OSD when holding **X (Xbox)** or **Square (PlayStation)** with the overlay menu closed.
+  - Gamepad and keyboard navigation flags are now strictly scoped to when the `[F10]` menu is active.
+- **DirectML / FSR 4.1.1 DLL Search Path**:
+  - Fixed library search path handling to ensure `amd_fidelityfx_upscaler_dx12.dll` and DirectML providers are always discovered on RDNA 3 / RDNA 4 systems.
+- **Diagnostics Tab UI Alignment**:
+  - Fixed column offset and label spacing so the PC Latency metric is never obscured by long diagnostic strings.
+
+### Changed
+- **DirectX 12 Engine Robustness**:
+  - Implemented `BarrierBatcher` for consolidated resource transition barriers.
+  - Replaced fixed RTV descriptor heap with dynamic capacity expansion supporting up to 8 swapchain backbuffers during runtime window resizes and fullscreen toggles.
+  - Streamlined presentation loop for ultra-low overhead and optimal frametime consistency.
+
+---
+
 ## [1.2.0] - 2026-10-15
 
 ### Added
