@@ -31,7 +31,6 @@ void EnsureLoaded() {
     std::error_code ec;
     for (const wchar_t* dllName : {
              L"amd_fidelityfx_upscaler_dx12.dll",
-             L"amd_fidelityfx_framegeneration_dx12.dll",
              L"amd_fidelityfx_loader_dx12.dll"
          }) {
         fs::path dllPath = g_targetDir / dllName;

@@ -40,7 +40,8 @@ if (Test-Path $sdkBins) {
     New-Item -ItemType Directory -Force $dataDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $sdkBins 'amd_fidelityfx_loader_dx12.dll') $dataDir -Force
     Copy-Item -LiteralPath (Join-Path $sdkBins 'amd_fidelityfx_upscaler_dx12.dll') $dataDir -Force
-    Copy-Item -LiteralPath (Join-Path $sdkBins 'amd_fidelityfx_framegeneration_dx12.dll') $dataDir -Force
+    $oldFg = Join-Path $dataDir 'amd_fidelityfx_framegeneration_dx12.dll'
+    if (Test-Path -LiteralPath $oldFg) { Remove-Item -LiteralPath $oldFg -Force }
 }
 
 # Deploy initial MHW-FSR.ini if not present in plugins

@@ -30,7 +30,6 @@ $signedbin = Join-Path $FfxSdkDir 'Kits\FidelityFX\signedbin'
 if (Test-Path $signedbin) {
     Copy-Item (Join-Path $signedbin 'amd_fidelityfx_loader_dx12.dll') $fsrDir -Force
     Copy-Item (Join-Path $signedbin 'amd_fidelityfx_upscaler_dx12.dll') $fsrDir -Force
-    Copy-Item (Join-Path $signedbin 'amd_fidelityfx_framegeneration_dx12.dll') $fsrDir -Force
 } else {
     Write-Warning "FidelityFX signedbin not found at $signedbin"
 }

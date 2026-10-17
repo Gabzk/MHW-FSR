@@ -103,13 +103,7 @@ constexpr wchar_t kDefaultIni[] =
     L"AntiLag2=1\n"
     L"\n"
     L"; AntiLagMaxFPS: Framerate limiter via driver pacing (0 = Unlimited).\n"
-    L"AntiLagMaxFPS=0\n"
-    L"\n"
-    L"[FrameGeneration]\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; FrameGen: AMD FidelityFX Frame Generation (interpolates frames to double FPS).\n"
-    L";   1 = Enabled, 0 = Disabled.\n"
-    L"FrameGen=0\n";
+    L"AntiLagMaxFPS=0\n";
 
 std::wstring g_iniPath;
 unsigned long long g_iniTime = 0;
@@ -266,11 +260,6 @@ void LoadConfig(const std::wstring& ini) {
     c.antiLag2 = ReadBool(ini, L"AntiLag", L"AntiLag2", c.antiLag2);
     c.antiLagMaxFps = std::max(0, static_cast<int>(ReadFloat(ini, L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps))));
 
-    // [FrameGeneration]
-    c.frameGen = ReadBool(ini, L"FrameGeneration", L"FrameGen", c.frameGen);
-    c.fgDebugView = ReadBool(ini, L"FrameGeneration", L"DebugView", c.fgDebugView);
-    c.fgDebugTearLines = ReadBool(ini, L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
-
     // [Advanced]
     c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
     c.depthInfinite = ReadBool(ini, L"Advanced", L"DepthInfinite", c.depthInfinite);
@@ -354,9 +343,6 @@ void SaveConfig(const Config& c) {
     writeBool(L"FSR", L"Bypass", c.bypass);
     writeBool(L"AntiLag", L"AntiLag2", c.antiLag2);
     writeFloat(L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps));
-    writeBool(L"FrameGeneration", L"FrameGen", c.frameGen);
-    writeBool(L"FrameGeneration", L"DebugView", c.fgDebugView);
-    writeBool(L"FrameGeneration", L"DebugTearLines", c.fgDebugTearLines);
     g_iniTime = LastWrite(g_iniPath);
 }
 
