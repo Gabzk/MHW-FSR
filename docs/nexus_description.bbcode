@@ -1,0 +1,79 @@
+[center]
+[size=6][b][color=#ff4d4d]MHW-FSR[/color]: AMD FidelityFX FSR 3.1 & 4.1[/b][/size]
+[size=4][i]Next-Gen Upscaling, Ultra-Crisp Anti-Aliasing (NativeAA) & Anti-Lag 2 for Monster Hunter: World[/i][/size]
+[/center]
+
+[size=5][b][color=#ff4d4d]✦ Overview[/color][/b][/size]
+[b]MHW-FSR[/b] is an open-source DirectX 12 mod for Monster Hunter: World that replaces the game's blurry, outdated DLSS 1.0 and legacy TAA with modern [b]AMD FidelityFX™ FSR[/b] technologies.
+
+Whether you want higher frame rates with high visual fidelity or the ultimate edge in motion clarity without any blurriness, MHW-FSR gives you full control directly inside the game!
+
+---
+
+[size=5][b][color=#ff4d4d]✦ Key Features[/color][/b][/size]
+[list]
+[*] [b]Universal GPU Compatibility[/b]: Works on [b]AMD Radeon[/b], [b]NVIDIA GeForce[/b], and [b]Intel Arc[/b] graphics cards (any GPU running DirectX 12).
+[*] [b]FSR 4 Machine-Learning Upscaling[/b]: Automatically leverages AMD's latest ML-based upscaler (FSR 4.1.1) on modern RDNA 3 (RX 7000 series) and RDNA 4 GPUs.
+[*] [b]FSR 3.1.5 Temporal Upscaling[/b]: Delivers top-tier temporal reconstruction with excellent stability on RDNA 1/2, GeForce GTX/RTX, and Intel Arc.
+[*] [b]NativeAA (Ultra-Crisp Anti-Aliasing)[/b]: Tired of Capcom's blurry TAA? NativeAA renders at 100% full screen resolution, applying FSR's state-of-the-art temporal anti-aliasing for maximum sharpness and clarity.
+[*] [b]AMD FidelityFX Anti-Lag 2[/b]: Native driver-level latency reduction on AMD Radeon cards. Drastically cuts click-to-photon latency (down from ~172 ms to ~32 ms) with built-in driver frame pacing.
+[*] [b]In-Game Overlay & Control Center[/b]: Press [b][F10][/b] or [b][Insert][/b] in-game anytime to tweak sharpness, switch presets, change architectures, or toggle Anti-Lag on the fly.
+[*] [b]Real-Time Latency & Diagnostics Profiler[/b]: Monitor your exact hardware upscale pass times, input latency, and frame pacing with the built-in live profiler.
+[*] [b]Zero Third-Party Bloat[/b]: Lightweight, standalone DirectX 12 plugin. Fully compatible with Stracker's Loader, Performance Booster, and all popular mods.
+[/list]
+
+---
+
+[size=5][b][color=#ff4d4d]✦ Requirements[/color][/b][/size]
+[list=1]
+[*] [b]Monster Hunter: World[/b] (v15.23) running in [b]DirectX 12[/b] mode.
+[*] [url=https://www.nexusmods.com/monsterhunterworld/mods/1982][b]Stracker's Loader[/b][/url] (required to load plugins from [i]nativePC\plugins\[/i]).
+[*] Windows 10 / 11 (64-bit).
+[/list]
+
+---
+
+[size=5][b][color=#ff4d4d]✦ Quick Installation[/color][/b][/size]
+[list=1]
+[*] Download the latest [b]MHW-FSR[/b] zip from the Files tab.
+[*] Extract the zip directly into your main [b]Monster Hunter World[/b] game directory:
+[code]
+Monster Hunter World\
+  └── nativePC\
+        └── plugins\
+              ├── MHW-FSR.dll
+              ├── MHW-FSR.ini
+              └── MHW-FSR\
+                    ├── amd_fidelityfx_loader_dx12.dll
+                    └── amd_fidelityfx_upscaler_dx12.dll
+[/code]
+[i](Make sure the two AMD DLLs stay inside the nativePC\plugins\MHW-FSR\ subfolder!)[/i]
+[*] Launch the game.
+[*] In the game menu, go to [b]Options ➔ Title Menu ➔ Display ➔ Advanced Graphics Settings[/b]:
+    - Set [b]DirectX 12 API[/b] to [b]ON[/b].
+    - Set [b]NVIDIA DLSS[/b] to [b]ON[/b] (the mod hooks this setting so it activates FSR on all GPUs, including AMD and Intel).
+[*] That's it! In-game, press [b][F10][/b] or [b][Insert][/b] anytime to open the settings menu.
+[/list]
+
+---
+
+[size=5][b][color=#ff4d4d]✦ Presets & In-Game Controls[/color][/b][/size]
+You can configure everything in real time using the in-game menu ([b]F10[/b]) or via [i]nativePC\plugins\MHW-FSR.ini[/i]:
+
+[list]
+[*] [b]NativeAA[/b]: 100% Native Resolution. Best possible image quality and anti-aliasing without upscaling.
+[*] [b]Quality[/b]: ~1.5x upscaling. Excellent balance between visuals and performance boost (recommended for 1440p / 4K).
+[*] [b]Balanced / Performance[/b]: ~1.7x to 2.0x upscaling. Substantial FPS increases for demanding hunts or portable devices (e.g. ROG Ally, Steam Deck).
+[*] [b]Sharpness Slider[/b]: Adjust AMD RCAS sharpening in real time to your visual taste.
+[*] [b]Anti-Lag 2 & Latency[/b]: Toggle driver-level low-latency mode and set a driver FPS limit for silky-smooth frame pacing.
+[/list]
+
+---
+
+[size=5][b][color=#ff4d4d]✦ Credits & Acknowledgments[/color][/b][/size]
+[list]
+[*] [b]odt1[/b] for [url=https://github.com/odt1/MHW-DLSS4]MHW-DLSS4[/url] — The foundational reverse-engineering, MT Framework TAA pass interception, and projection matrix analysis.
+[*] [b]Stracker[/b] for [url=https://www.nexusmods.com/monsterhunterworld/mods/1982]Stracker's Loader[/url].
+[*] [b]wowo-dot[/b] for [url=https://www.nexusmods.com/monsterhunterworld/mods/8856]CMFM[/url] and Astera Loader.
+[*] [b]AMD FidelityFX™ SDK[/b] by Advanced Micro Devices, Inc.
+[/list]
