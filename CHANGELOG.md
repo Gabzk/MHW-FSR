@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Drastically minimizes click-to-photon and input-to-present latency on AMD Radeon GPUs (tested drop from ~172 ms down to ~32 ms).
   - Added in-game toggle under the new **Anti-Lag 2 & Latency** tab.
   - Added integrated **Driver Frame Pacing** slider (Driver Max FPS limiter) to prevent GPU queue bloat without external frame limiters.
-- **OptiScaler-Style Latency & Performance Profiler**:
+- **Advanced Latency & Performance Profiler**:
   - Added dedicated hardware and CPU telemetry profiler under the **Diagnostics & Profiler** tab:
     - **Upscaler Pass Latency**: Real-time GPU execution time (via D3D12 hardware timestamp queries) and CPU command recording time.
     - **Anti-Lag 2 CPU Synchronization Wait**: Exact milliseconds spent synchronizing CPU input with GPU dispatch.

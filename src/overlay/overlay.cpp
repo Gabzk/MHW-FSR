@@ -635,7 +635,7 @@ void RenderMainWindow() {
             // Tab 4: Diagnostics & Telemetry Profiler
             if (ImGui::BeginTabItem("Diagnostics & Profiler")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "LATENCY & PERFORMANCE PROFILER (OPTISCALER STYLE)");
+                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "LATENCY & PERFORMANCE PROFILER");
 
                 ImGui::BeginChild("ProfilerBox", ImVec2(0, 150), true);
                 {

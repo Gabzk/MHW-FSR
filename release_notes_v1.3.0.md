@@ -5,9 +5,9 @@
 ## 1. GitHub Release Notes (Markdown)
 
 ```markdown
-# MHW-FSR v1.3.0: AMD FidelityFX Anti-Lag 2, OptiScaler-Style Latency Profiler & Community Fixes
+# MHW-FSR v1.3.0: AMD FidelityFX Anti-Lag 2, Latency Profiler & Community Fixes
 
-This release brings official, native **AMD FidelityFX Anti-Lag 2 SDK** integration, a full real-time **hardware timestamp & latency profiler** (OptiScaler style), and resolves key community feedback reported on Nexus Mods (including ROG Ally fallback fixes, Steam Cloud/save isolation, and controller navigation improvements).
+This release brings official, native **AMD FidelityFX Anti-Lag 2 SDK** integration, a full real-time **hardware timestamp & latency profiler**, and resolves key community feedback reported on Nexus Mods (including ROG Ally fallback fixes, Steam Cloud/save isolation, and controller navigation improvements).
 
 ---
 
@@ -18,7 +18,7 @@ This release brings official, native **AMD FidelityFX Anti-Lag 2 SDK** integrati
 - **In-Game Toggle**: Toggle Anti-Lag 2 anytime from the new **Anti-Lag 2 & Latency** tab in the **[F10]** Control Center.
 - **Integrated Driver Max FPS Limiter**: Built-in frame rate limiter executed by the Radeon driver, preventing GPU render queue bloat and frame time spikes without external tools (RTSS, Special K, etc.).
 
-#### 📊 OptiScaler-Style Latency & Performance Profiler
+#### 📊 Advanced Latency & Performance Profiler
 - **Hardware D3D12 Timestamp Queries**: Accurate GPU execution measurement via `ID3D12QueryHeap` alongside high-precision CPU timers.
 - **Diagnostics & Profiler Tab**:
   - **Upscaler Pass Latency**: Real-time breakdown of GPU execution vs. CPU command recording (`GPU ms / CPU ms`).
@@ -67,7 +67,7 @@ This release brings official, native **AMD FidelityFX Anti-Lag 2 SDK** integrati
 [list]
 [*] [b]AMD FidelityFX Anti-Lag 2 SDK Integration[/b]: Native driver-level latency reduction via [i]amdxc64.dll[/i]. Tested click-to-photon latency drops from [b]~172 ms down to ~32 ms[/b] on AMD Radeon GPUs! Toggle it on the fly under the [b]Anti-Lag 2 & Latency[/b] tab.
 [*] [b]Integrated Driver Frame Pacing[/b]: Built-in Radeon driver frame limiter ([b]Driver Max FPS[/b]) to maintain smooth pacing and eliminate GPU render queue bloat without third-party limiters.
-[*] [b]OptiScaler-Style Latency & Performance Profiler[/b]: Comprehensive hardware telemetry under the [b]Diagnostics & Profiler[/b] tab:
+[*] [b]Advanced Latency & Performance Profiler[/b]: Comprehensive hardware telemetry under the [b]Diagnostics & Profiler[/b] tab:
     [list]
     [*] Upscaler Pass latency (GPU ms & CPU ms via D3D12 hardware timestamp queries).
     [*] Anti-Lag 2 driver sync wait delay.

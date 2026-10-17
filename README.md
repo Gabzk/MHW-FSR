@@ -13,7 +13,7 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 - **Universal GPU Support**: Runs natively on AMD Radeon (RDNA 1/2/3/4), Intel Arc, and NVIDIA GeForce GPUs.
 - **AMD FidelityFX Anti-Lag 2**: Native driver-level integration (`amdxc64.dll`) to slash click-to-photon latency on AMD Radeon cards down to ~32 ms. Includes driver-level frame pacing limiter.
 - **FSR 4 ML Upgrade for RDNA 3 & 4**: Automatically leverages AMD's machine-learning upscaler (`FSR 4.1.1`) on RDNA 3 (e.g. RX 7000 series like RX 7700 XT) and RDNA 4 GPUs, while providing high-quality **FSR 3.1.5** temporal upscaling on earlier architectures.
-- **OptiScaler-Style Latency & Performance Profiler**: Hardware timestamp queries and CPU profiler tracking upscale time, driver pacing sync delay, queue latency, and end-to-end PC Latency.
+- **Advanced Latency & Performance Profiler**: Hardware timestamp queries and CPU profiler tracking upscale time, driver pacing sync delay, queue latency, and end-to-end PC Latency.
 - **NativeAA (Native Resolution Anti-Aliasing)**: Replaces MT Framework's blurry legacy TAA with crisp FSR temporal anti-aliasing at 100% native resolution.
 - **Native In-Game Overlay & OSD**: Standalone, hardware-accelerated DirectX 12 overlay built with Dear ImGui. Press **[F10]** or **[Insert]** to open the Control Center anytime in-game.
 - **Real-Time Hot-Reloading**: Seamlessly switch quality presets, customize render scales, adjust RCAS sharpness, toggle FSR architectures, or do live A/B comparisons against vanilla Capcom TAA.
