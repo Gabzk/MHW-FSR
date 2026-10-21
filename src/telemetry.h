@@ -32,7 +32,12 @@ struct Metrics {
 void Init(ID3D12Device* device);
 void Shutdown();
 
-// Input & Anti-Lag 2 timing (called around AntiLag2::Update on main input thread)
+// Enable/disable active GPU timestamp query & fence profiling (active only when UI/OSD needs it)
+void SetProfilerActive(bool active);
+bool IsProfilerActive();
+
+// Input & Anti-Lag 2 timing
+void RecordInputSample();
 void BeginAntiLagUpdate();
 void EndAntiLagUpdate(bool active);
 

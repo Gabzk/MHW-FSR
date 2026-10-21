@@ -32,8 +32,13 @@ std::atomic<uint32_t> g_upscaleWriteSlot{0};
 std::atomic<uint32_t> g_fgWriteSlot{0};
 thread_local int64_t t_upscaleStartQpc = 0;
 thread_local uint32_t t_upscaleSlot = 0;
+thread_local bool t_upscaleQueried = false;
 thread_local int64_t t_fgStartQpc = 0;
 thread_local uint32_t t_fgSlot = 0;
+thread_local bool t_fgQueried = false;
+
+std::atomic<bool> g_profilerActive{false};
+std::atomic<uint64_t> g_gpuTimestampFreq{0};
 
 std::atomic<int64_t> g_al2StartQpc{0};
 std::atomic<int64_t> g_lastInputPollQpc{0};
@@ -120,16 +125,33 @@ void Shutdown() {
     g_readbackBuffer.Reset();
     g_gpuLatencyFence.Reset();
     g_gpuLatencyFenceVal = 0;
+    g_gpuTimestampFreq.store(0, std::memory_order_relaxed);
+}
+
+void SetProfilerActive(bool active) {
+    g_profilerActive.store(active, std::memory_order_relaxed);
+}
+
+bool IsProfilerActive() {
+    return g_profilerActive.load(std::memory_order_relaxed);
+}
+
+void RecordInputSample() {
+    g_lastInputPollQpc.store(NowQpc(), std::memory_order_relaxed);
 }
 
 void BeginAntiLagUpdate() {
+    if (!IsProfilerActive()) return;
     g_al2StartQpc.store(NowQpc(), std::memory_order_relaxed);
 }
 
 void EndAntiLagUpdate(bool active) {
+    if (!IsProfilerActive()) return;
     int64_t now = NowQpc();
     int64_t start = g_al2StartQpc.load(std::memory_order_relaxed);
-    g_lastInputPollQpc.store(now, std::memory_order_relaxed);
+    if (g_lastInputPollQpc.load(std::memory_order_relaxed) == 0) {
+        g_lastInputPollQpc.store(now, std::memory_order_relaxed);
+    }
 
     float waitMs = active && start > 0 ? static_cast<float>(QpcToMs(now - start)) : 0.0f;
     waitMs = std::clamp(waitMs, 0.0f, 50.0f);
@@ -143,54 +165,65 @@ void EndAntiLagUpdate(bool active) {
 }
 
 void BeginUpscalePass(ID3D12GraphicsCommandList* cl) {
+    t_upscaleQueried = false;
+    if (!IsProfilerActive()) return;
     t_upscaleStartQpc = NowQpc();
     if (!cl || !g_queryHeap) return;
     uint32_t slot = g_upscaleWriteSlot.fetch_add(1, std::memory_order_relaxed) % kQueryRingSize;
     t_upscaleSlot = slot;
+    t_upscaleQueried = true;
     uint32_t queryIdx = slot * 2;
     cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx);
 }
 
 void EndUpscalePass(ID3D12GraphicsCommandList* cl) {
+    if (!IsProfilerActive() && !t_upscaleQueried) return;
     int64_t endQpc = NowQpc();
     float cpuMs = static_cast<float>(QpcToMs(endQpc - t_upscaleStartQpc));
 
-    if (cl && g_queryHeap && g_readbackBuffer) {
+    if (t_upscaleQueried && cl && g_queryHeap && g_readbackBuffer) {
         uint32_t queryIdx = t_upscaleSlot * 2;
         cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx + 1);
         cl->ResolveQueryData(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx, 2,
                              g_readbackBuffer.Get(), static_cast<UINT64>(queryIdx) * sizeof(uint64_t));
     }
+    t_upscaleQueried = false;
 
     std::lock_guard lock(g_mutex);
     g_metrics.upscaleCpuMs = SmoothEma(g_metrics.upscaleCpuMs, std::clamp(cpuMs, 0.0f, 50.0f));
 }
 
 void BeginFrameGenPass(ID3D12GraphicsCommandList* cl) {
+    t_fgQueried = false;
+    if (!IsProfilerActive()) return;
     t_fgStartQpc = NowQpc();
     if (!cl || !g_queryHeap) return;
     uint32_t slot = g_fgWriteSlot.fetch_add(1, std::memory_order_relaxed) % kQueryRingSize;
     t_fgSlot = slot;
+    t_fgQueried = true;
     uint32_t queryIdx = (kQueryRingSize + slot) * 2;
     cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx);
 }
 
 void EndFrameGenPass(ID3D12GraphicsCommandList* cl) {
+    if (!IsProfilerActive() && !t_fgQueried) return;
     int64_t endQpc = NowQpc();
     float cpuMs = static_cast<float>(QpcToMs(endQpc - t_fgStartQpc));
 
-    if (cl && g_queryHeap && g_readbackBuffer) {
+    if (t_fgQueried && cl && g_queryHeap && g_readbackBuffer) {
         uint32_t queryIdx = (kQueryRingSize + t_fgSlot) * 2;
         cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx + 1);
         cl->ResolveQueryData(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx, 2,
                              g_readbackBuffer.Get(), static_cast<UINT64>(queryIdx) * sizeof(uint64_t));
     }
+    t_fgQueried = false;
 
     std::lock_guard lock(g_mutex);
     g_metrics.fgCpuMs = SmoothEma(g_metrics.fgCpuMs, std::clamp(cpuMs, 0.0f, 50.0f));
 }
 
 void RecordFgPaceDelay(float delayMs) {
+    if (!IsProfilerActive()) return;
     std::lock_guard lock(g_mutex);
     g_metrics.fgPaceDelayMs = SmoothEma(g_metrics.fgPaceDelayMs, std::clamp(delayMs, 0.0f, 50.0f));
 }
@@ -205,6 +238,13 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
     float baseDtMs = (prevReal > 0) ? static_cast<float>(QpcToMs(now - prevReal)) : 16.666f;
     baseDtMs = std::clamp(baseDtMs, 0.5f, 250.0f);
 
+    if (!IsProfilerActive()) {
+        std::lock_guard lock(g_mutex);
+        g_metrics.baseFrameTimeMs = SmoothEma(g_metrics.baseFrameTimeMs, baseDtMs, 0.10f);
+        g_metrics.baseFps = (g_metrics.baseFrameTimeMs > 0.1f) ? (1000.0f / g_metrics.baseFrameTimeMs) : 0.0f;
+        return;
+    }
+
     int64_t inputQpc = g_lastInputPollQpc.load(std::memory_order_relaxed);
     float cpuInputToPresentMs = (inputQpc > 0 && now > inputQpc)
                                     ? static_cast<float>(QpcToMs(now - inputQpc))
@@ -213,7 +253,6 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
 
     float gpuQueueMs = 0.0f;
     float resolvedUpscaleGpuMs = -1.0f;
-    float resolvedFgGpuMs = -1.0f;
 
     if (queue) {
         // Measure GPU queue latency via fence completion
@@ -231,39 +270,32 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
             queue->Signal(g_gpuLatencyFence.Get(), nextFence);
         }
 
+        // Cache GPU timestamp frequency once instead of querying kernel every frame
+        uint64_t gpuFreq = g_gpuTimestampFreq.load(std::memory_order_relaxed);
+        if (gpuFreq == 0) {
+            UINT64 freq = 0;
+            if (SUCCEEDED(queue->GetTimestampFrequency(&freq)) && freq > 0) {
+                gpuFreq = freq;
+                g_gpuTimestampFreq.store(gpuFreq, std::memory_order_relaxed);
+            }
+        }
+
         // Resolve GPU timestamps from 4 frames ago (guaranteed completed on GPU)
-        UINT64 gpuFreq = 0;
-        if (g_readbackBuffer && SUCCEEDED(queue->GetTimestampFrequency(&gpuFreq)) && gpuFreq > 0) {
+        uint32_t upWrite = g_upscaleWriteSlot.load(std::memory_order_relaxed);
+        if (g_readbackBuffer && gpuFreq > 0 && upWrite >= 4) {
+            uint32_t upReadSlot = (upWrite - 4) % kQueryRingSize;
+            size_t byteOffset = static_cast<size_t>(upReadSlot * 2) * sizeof(uint64_t);
+            D3D12_RANGE readRange{byteOffset, byteOffset + 2 * sizeof(uint64_t)};
             uint64_t* mapped = nullptr;
-            D3D12_RANGE readRange{0, kTotalQueries * sizeof(uint64_t)};
             if (SUCCEEDED(g_readbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&mapped))) && mapped) {
-                uint32_t upWrite = g_upscaleWriteSlot.load(std::memory_order_relaxed);
-                if (upWrite >= 4) {
-                    uint32_t upReadSlot = (upWrite - 4) % kQueryRingSize;
-                    uint64_t t0 = mapped[upReadSlot * 2];
-                    uint64_t t1 = mapped[upReadSlot * 2 + 1];
-                    if (t0 > 0 && t1 > t0) {
-                        double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(gpuFreq);
-                        if (ms > 0.001 && ms < 100.0) {
-                            resolvedUpscaleGpuMs = static_cast<float>(ms);
-                        }
+                uint64_t t0 = mapped[upReadSlot * 2];
+                uint64_t t1 = mapped[upReadSlot * 2 + 1];
+                if (t0 > 0 && t1 > t0) {
+                    double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(gpuFreq);
+                    if (ms > 0.001 && ms < 100.0) {
+                        resolvedUpscaleGpuMs = static_cast<float>(ms);
                     }
                 }
-
-                uint32_t fgWrite = g_fgWriteSlot.load(std::memory_order_relaxed);
-                if (fgWrite >= 4) {
-                    uint32_t fgReadSlot = (fgWrite - 4) % kQueryRingSize;
-                    uint32_t baseIdx = (kQueryRingSize + fgReadSlot) * 2;
-                    uint64_t t0 = mapped[baseIdx];
-                    uint64_t t1 = mapped[baseIdx + 1];
-                    if (t0 > 0 && t1 > t0) {
-                        double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(gpuFreq);
-                        if (ms > 0.001 && ms < 100.0) {
-                            resolvedFgGpuMs = static_cast<float>(ms);
-                        }
-                    }
-                }
-
                 D3D12_RANGE emptyRange{0, 0};
                 g_readbackBuffer->Unmap(0, &emptyRange);
             }
@@ -286,9 +318,6 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
 
     if (resolvedUpscaleGpuMs >= 0.0f) {
         g_metrics.upscaleGpuMs = SmoothEma(g_metrics.upscaleGpuMs, resolvedUpscaleGpuMs, 0.15f);
-    }
-    if (resolvedFgGpuMs >= 0.0f) {
-        g_metrics.fgGpuMs = SmoothEma(g_metrics.fgGpuMs, resolvedFgGpuMs, 0.15f);
     }
     g_metrics.generatedFramesTotal = g_generatedFramesTotal.load(std::memory_order_relaxed);
 }

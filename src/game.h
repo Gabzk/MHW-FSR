@@ -31,7 +31,7 @@ struct Jitter {
     bool cut = false;  // the camera jumped since the previous frame: DLSS history must not be used
     float fovY = 0.785398f;
     float cameraNear = 0.1f;
-    float cameraFar = 10000.0f;
+    float cameraFar = 1000.0f;
     float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
     float cameraUp[3] = {0.0f, 1.0f, 0.0f};
     float cameraRight[3] = {1.0f, 0.0f, 0.0f};

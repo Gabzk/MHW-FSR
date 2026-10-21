@@ -182,17 +182,16 @@ struct JitterRecord {
     Jitter jitter;
 };
 std::mutex g_jitterMutex;
-std::array<JitterRecord, 8> g_jitterRecords;
+std::array<JitterRecord, 32> g_jitterRecords;
 size_t g_jitterNext = 0;
 
 // Camera cuts. The game only asks DLSS for a reset when it rebuilds the TAA history (render size
 // changes, loading); a cut in a cutscene keeps the history, and DLSS then blends the previous shot
-// into the first frames of the new one. A cut is a jump of the main viewport's camera since the last
-// frame that built the TAA pass: position, view direction or projection. Frames without a TAA pass
-// in between don't hide a cut; DLSS had no new input then, so a jump across them needs a reset too.
-constexpr float kCutDistance = 500.0f;     // world units (centimetres)
-constexpr float kCutTurnCos = 0.7071f;     // 45 degrees
-constexpr float kCutProjection = 0.05f;    // relative change of the projection's x/y scale
+// into the first frames of the new one. A cut is a jump of the main viewport's camera position
+// since the last frame that built the TAA pass.
+constexpr float kCutDistance = 1500.0f;    // world units (centimetres; 15m jump)
+constexpr float kCutTurnCos = 0.3420f;     // 70 degrees (logged for diagnostics)
+constexpr float kCutProjection = 0.25f;    // relative change of the projection's x/y scale
 
 struct CameraShot {
     std::array<float, 3> position{};
@@ -202,7 +201,7 @@ struct CameraShot {
     std::array<float, 2> scale{};
     float fovY = 0.785398f;
     float nearZ = 0.1f;
-    float farZ = 10000.0f;
+    float farZ = 1000.0f;
     int viewport = 0;
 };
 uint64_t g_cutFrame = 0;  // renderer frame of the last camera read
@@ -236,22 +235,24 @@ std::optional<CameraShot> ReadShot(uint8_t* camera) {
         }
         shot.scale = {(*proj)[0], (*proj)[5]};
         if (std::abs((*proj)[5]) > 1e-4f) {
-            shot.fovY = 2.0f * std::atan(1.0f / (*proj)[5]);
+            shot.fovY = 2.0f * std::atan(1.0f / std::abs((*proj)[5]));
         }
         float A = (*proj)[10];
         float B = (*proj)[14];
-        if (std::abs(A) < 1e-5f) {
-            shot.nearZ = B > 0.001f ? B : 0.1f;
-            shot.farZ = 10000.0f;
-        } else if (A < 0.0f) {
-            shot.nearZ = (1.0f - A) != 0.0f ? B / (1.0f - A) : 0.1f;
-            shot.farZ = -B / A;
+        // MHW uses Reversed-Z (z_ndc = 1 at near, 0 at far) and Right-Handed view space (A > 0, B > 0).
+        // Using |A| and |B| makes the extraction invariant to LH vs RH sign conventions:
+        // near_cm = |B| / (1 + |A|), far_cm = |B| / |A|, then convert centimetres -> meters (* 0.01f).
+        float absA = std::abs(A);
+        float absB = std::abs(B);
+        if (absA < 1e-5f) {
+            shot.nearZ = absB > 0.001f ? absB * 0.01f : 0.1f;
+            shot.farZ = 1000.0f;
         } else {
-            shot.nearZ = -B / A;
-            shot.farZ = (1.0f - A) != 0.0f ? B / (1.0f - A) : 10000.0f;
+            shot.nearZ = (absB / (1.0f + absA)) * 0.01f;
+            shot.farZ = (absB / absA) * 0.01f;
         }
-        if (shot.nearZ <= 0.0f || !std::isfinite(shot.nearZ)) shot.nearZ = 0.1f;
-        if (shot.farZ <= shot.nearZ || !std::isfinite(shot.farZ)) shot.farZ = 10000.0f;
+        if (shot.nearZ < 0.001f || shot.nearZ > 10.0f || !std::isfinite(shot.nearZ)) shot.nearZ = 0.1f;
+        if (shot.farZ <= shot.nearZ * 100.0f || !std::isfinite(shot.farZ)) shot.farZ = 1000.0f;
         if (shot.fovY <= 0.0f || !std::isfinite(shot.fovY)) shot.fovY = 0.785398f;
 
         bool finite = std::ranges::all_of(v, [](float x) { return std::isfinite(x); }) &&
@@ -294,12 +295,18 @@ bool CameraCut(uint8_t* camera, uint64_t frame) {
         float zoom = 0.0f;
         for (int j = 0; j < 2; ++j)
             if (a.scale[j] != 0.0f) zoom = std::max(zoom, std::abs(b.scale[j] / a.scale[j] - 1.0f));
-        g_cutFrameIsCut = d2 > kCutDistance * kCutDistance || cosTurn < kCutTurnCos || zoom > kCutProjection;
+        // Only trigger a full temporal history wipe (dp.reset = true) on real camera position teleports
+        // (> 15m). Dynamic FOV zoom during weapon attacks (TCS, Helmbreaker, Bow/HBG aim, monster roars)
+        // or fast Focus Camera turns are already represented in the engine's motion vectors; resetting
+        // FSR's temporal accumulation on zoom/turn causes a sudden split-second blurry screen.
+        g_cutFrameIsCut = d2 > kCutDistance * kCutDistance;
         if (g_cutFrameIsCut && g_cuts.fetch_add(1) < 20)
             LOGD("camera cut at frame {}: moved {:.0f}, turned {:.0f} degrees, zoom {:.1f}%; DLSS history reset",
                  frame, std::sqrt(d2), std::acos(std::clamp(cosTurn, -1.0f, 1.0f)) * 57.29578f, zoom * 100.0f);
     }
-    g_lastShot = shot;
+    if (shot) {
+        g_lastShot = shot;
+    }
     return g_cutFrameIsCut;
 }
 
