@@ -35,11 +35,15 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 2. [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982) (supporting `nativePC\plugins\`).
 3. Windows 10/11 64-bit with current graphics drivers.
 
+### Compatibility
+- **SharpPluginLoader (SPL) 2.0+**: Fully compatible out of the box (includes automated WndProc cycle prevention).
+- **Stracker's Loader & Performance Booster**: Fully compatible.
+
 ---
 
 ## Installation
 
-1. Download or extract the release archive (`MHW-FSR-v1.2.0.zip`) into your game directory (`Monster Hunter World`):
+1. Download or extract the release archive (`MHW-FSR-<version>.zip`) into your game directory (`Monster Hunter World`):
    ```
    nativePC\plugins\MHW-FSR.dll
    nativePC\plugins\MHW-FSR.ini

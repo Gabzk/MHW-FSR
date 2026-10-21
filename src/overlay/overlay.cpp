@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include "wndproc_chain.h"
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -76,7 +77,7 @@ UINT g_swapChainWidth = 0;
 UINT g_swapChainHeight = 0;
 DXGI_FORMAT g_swapChainFormat = DXGI_FORMAT_UNKNOWN;
 HWND g_hwnd = nullptr;
-WNDPROC g_origWndProc = nullptr;
+WndProcChain g_wndProcChain;
 
 std::atomic<bool> g_hooked{false};
 bool g_initialized = false;
@@ -174,6 +175,49 @@ void ApplyTheme() {
 }
 
 LRESULT CALLBACK HookWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto& chain = g_wndProcChain;
+
+    // 1. Proactive check: if another hook (e.g. SPL 2.0 on ResizeBuffers)
+    // wrapped the window and points to us as its next, calling our nextProc would loop.
+    if (chain.CheckAndRepairIfWrapped(hWnd, &HookWndProc)) {
+        LOGW("overlay: WndProc cycle detected proactively (another hook wrapped ours); repaired chain to class WndProc");
+    }
+
+    // 2. Reactive check: identical message already in-flight on this thread
+    if (chain.InCycle(hWnd, msg, wParam, lParam)) {
+        int c = chain.cycleCount.fetch_add(1, std::memory_order_relaxed);
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LOGW("overlay: WndProc recursion cycle detected; repairing chain to class WndProc");
+        }
+        chain.Repair(hWnd, &HookWndProc);
+
+        if (c > 3) {
+            chain.passthrough.store(true, std::memory_order_relaxed);
+            static bool ptLogged = false;
+            if (!ptLogged) {
+                ptLogged = true;
+                LOGE("overlay: persistent WndProc loop detected; activating emergency passthrough mode");
+            }
+        }
+
+        WNDPROC root = chain.ResolveClassProc(hWnd);
+        return CallWindowProcW(root, hWnd, msg, wParam, lParam);
+    }
+
+    if (chain.passthrough.load(std::memory_order_relaxed)) {
+        WNDPROC root = chain.ResolveClassProc(hWnd);
+        return CallWindowProcW(root, hWnd, msg, wParam, lParam);
+    }
+
+    InFlightMsg inFlight{hWnd, msg, wParam, lParam, t_inFlight};
+    t_inFlight = &inFlight;
+    struct InFlightGuard {
+        const InFlightMsg* prev;
+        ~InFlightGuard() { t_inFlight = prev; }
+    } guard{inFlight.prev};
+
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && (wParam == VK_F10 || wParam == VK_INSERT)) {
         bool isRepeat = (lParam & (1 << 30)) != 0;
         if (!isRepeat) {
@@ -199,7 +243,11 @@ LRESULT CALLBACK HookWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
     }
 
-    return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
+    WNDPROC next = chain.nextProc.load(std::memory_order_acquire);
+    if (!next || next == &HookWndProc) {
+        next = chain.ResolveClassProc(hWnd);
+    }
+    return CallWindowProcW(next, hWnd, msg, wParam, lParam);
 }
 
 bool CreateRenderTargetViews(IDXGISwapChain3* swapChain) {
@@ -332,7 +380,18 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     }
 
     // Hook game window input
-    g_origWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&HookWndProc)));
+    WNDPROC orig = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&HookWndProc)));
+    if (orig != &HookWndProc) {
+        g_wndProcChain.nextProc.store(orig, std::memory_order_release);
+    }
+    WNDPROC cls = g_wndProcChain.ResolveClassProc(g_hwnd);
+    if (orig && orig != cls) {
+        LOGI("overlay: hooked game window WndProc (previous hook at {:#x}, class WndProc at {:#x})",
+             reinterpret_cast<uintptr_t>(orig), reinterpret_cast<uintptr_t>(cls));
+    } else {
+        LOGI("overlay: hooked game window WndProc (class WndProc at {:#x})",
+             reinterpret_cast<uintptr_t>(cls));
+    }
 
     auto versions = loader::QueryVersions(g_device.Get());
     if (!versions.empty()) {
@@ -1014,6 +1073,12 @@ void OnPostResize(IDXGISwapChain3* swapChain) {
     }
 
     CreateRenderTargetViews(swapChain);
+
+    if (g_hwnd) {
+        if (g_wndProcChain.CheckAndRepairIfWrapped(g_hwnd, &HookWndProc)) {
+            LOGW("overlay: detected re-wrapped WndProc on resize (e.g. SPL); repaired chain to class WndProc");
+        }
+    }
 }
 
 bool IsVisible() {

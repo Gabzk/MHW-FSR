@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(MHW-FSR VERSION 1.4.0 LANGUAGES CXX)
+project(MHW-FSR VERSION 1.4.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -76,3 +76,16 @@ target_link_libraries(MHW-FSR PRIVATE
   d3d12
   dxgi
 )
+
+add_executable(wndproc_selftest
+  tools/wndproc_selftest.cpp
+)
+target_include_directories(wndproc_selftest PRIVATE src/overlay)
+target_compile_definitions(wndproc_selftest PRIVATE
+  WIN32_LEAN_AND_MEAN
+  NOMINMAX
+  UNICODE
+  _UNICODE
+)
+target_compile_options(wndproc_selftest PRIVATE /W4 /permissive- /utf-8 /EHsc)
+target_link_libraries(wndproc_selftest PRIVATE user32)
