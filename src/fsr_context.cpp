@@ -1,5 +1,6 @@
 #include "fsr_context.h"
 #include "barrier_batcher.h"
+#include "config.h"
 #include "d3d_util.h"
 #include "fsr_loader.h"
 #include "log.h"
@@ -98,12 +99,21 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
     ffx::CreateBackendDX12Desc backendDesc{};
     backendDesc.device = device;
 
+    Fsr4Model requestedModel = static_cast<Fsr4Model>(settings.modelOverride);
+    loader::ApplyFsr4ModelOverride(requestedModel);
+
     ffx::ReturnCode rc;
     uint64_t activeVersionId = settings.versionId;
     if (activeVersionId != 0) {
         ffx::CreateContextDescOverrideVersion overrideDesc{};
         overrideDesc.versionId = activeVersionId;
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc, overrideDesc);
+        if (!rc && requestedModel != Fsr4Model::Auto) {
+            LOGW("FSR CreateContext with forced model {} failed (code {:#x}), retrying with Auto model",
+                 Fsr4ModelName(requestedModel), static_cast<uint32_t>(rc));
+            loader::ApplyFsr4ModelOverride(Fsr4Model::Auto);
+            rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc, overrideDesc);
+        }
         if (!rc) {
             uint64_t fsr3Id = loader::ResolveVersionId(device, "FSR 3.1");
             if (fsr3Id != 0 && fsr3Id != activeVersionId) {
@@ -122,6 +132,12 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
         }
     } else {
         rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
+        if (!rc && requestedModel != Fsr4Model::Auto) {
+            LOGW("FSR CreateContext with forced model {} failed (code {:#x}), retrying with Auto model",
+                 Fsr4ModelName(requestedModel), static_cast<uint32_t>(rc));
+            loader::ApplyFsr4ModelOverride(Fsr4Model::Auto);
+            rc = ffx::CreateContext(m_context, nullptr, upscaleDesc, backendDesc, versionDesc);
+        }
     }
 
     if (!rc) {
@@ -153,10 +169,12 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
         }
     }
     if (!activeVer.empty()) {
-        if (activeVer.find("FSR") == std::string::npos && activeVer.find("fsr") == std::string::npos) {
-            activeVer = "FSR " + activeVer;
+        std::string formattedVer = loader::FormatVersionName(activeVer);
+        std::string modelDesc = loader::DescribeActiveFsr4Model(m_context);
+        if (!modelDesc.empty()) {
+            formattedVer += " (" + modelDesc + ")";
         }
-        SetActiveFsrVersion(activeVer);
+        SetActiveFsrVersion(formattedVer);
     }
 
     LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x}, version {:#x} ({})",
@@ -198,7 +216,7 @@ bool FsrContext::Dispatch(const DispatchParams& params) {
     d.preExposure = params.preExposure > 0.0f ? params.preExposure : 1.0f;
     d.reset = params.reset;
     d.cameraNear = params.cameraNear > 0.0f ? params.cameraNear : 0.1f;
-    d.cameraFar = params.cameraFar > d.cameraNear ? params.cameraFar : 10000.0f;
+    d.cameraFar = params.cameraFar > d.cameraNear ? params.cameraFar : 1000.0f;
     d.cameraFovAngleVertical = params.cameraFovAngleVertical > 0.0f ? params.cameraFovAngleVertical : 0.785398f;
     d.viewSpaceToMetersFactor = 1.0f;
     d.flags = 0;
@@ -208,11 +226,6 @@ bool FsrContext::Dispatch(const DispatchParams& params) {
         LOGE("FsrContext::Dispatch failed (code {:#x})", static_cast<uint32_t>(rc));
         return false;
     }
-
-    // Flush UAV writes on output to guarantee coherency for subsequent passes
-    d3d::BarrierBatcher batcher(params.commandList);
-    batcher.Uav(params.output);
-    batcher.Flush();
 
     return true;
 }

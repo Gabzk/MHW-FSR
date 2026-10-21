@@ -24,6 +24,7 @@ public:
         uint32_t upscaleH = 0;
         uint32_t flags = 0;
         uint64_t versionId = 0;
+        uint32_t modelOverride = 0;
 
         bool operator==(const Settings&) const = default;
     };

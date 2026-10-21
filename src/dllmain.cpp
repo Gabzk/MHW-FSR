@@ -9,6 +9,7 @@
 #include "game.h"
 #include "log.h"
 #include "ngx_shim.h"
+#include "telemetry.h"
 
 namespace fs = std::filesystem;
 using namespace mhwfsr;
@@ -69,9 +70,9 @@ void Start(HMODULE module) {
         return;
     }
 
-    // Connect Anti-Lag 2 update to game input polling (before input sampling)
+    // Record mouse input polling timestamp for PC latency telemetry
     game::SetInputCallback([]() {
-        antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+        telemetry::RecordInputSample();
     });
 
     if (!ngx::Install(dataDir.wstring(), exe.parent_path().wstring())) {

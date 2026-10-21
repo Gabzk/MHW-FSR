@@ -23,6 +23,7 @@
 #include "game.h"
 #include "log.h"
 #include "memory.h"
+#include "ngx_shim.h"
 #include "telemetry.h"
 
 #include "imgui.h"
@@ -343,10 +344,7 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
                 break;
             }
         }
-        if (initialVer.find("FSR") == std::string::npos && initialVer.find("fsr") == std::string::npos) {
-            initialVer = "FSR " + initialVer;
-        }
-        SetActiveFsrVersion(initialVer);
+        SetActiveFsrVersion(loader::FormatVersionName(initialVer));
     }
 
     LOGI("MHW-FSR DirectX 12 Overlay initialized successfully (Hotkey: [F10] or [Insert])");
@@ -493,6 +491,7 @@ void RenderMainWindow() {
                     g_config.mode = static_cast<QualityMode>(currentPreset);
                     game::ApplyConfig(g_config);
                     game::RecomputeRenderScale();
+                    ngx::ResetAllFeatures();
                 }
 
                 if (g_config.mode == QualityMode::Custom) {
@@ -500,6 +499,7 @@ void RenderMainWindow() {
                     if (ImGui::SliderFloat("Custom Scale", &g_config.customScale, 0.50f, 1.00f, "%.2fx")) {
                         game::ApplyConfig(g_config);
                         game::RecomputeRenderScale();
+                        ngx::ResetAllFeatures();
                     }
                 }
 
@@ -538,36 +538,94 @@ void RenderMainWindow() {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "UPSCALER ARCHITECTURE");
 
+                auto availableVersions = loader::QueryVersions(g_device.Get());
                 bool hasFsr4 = loader::HasFsr4Support(g_device.Get());
 
-                std::vector<const char*> versions;
-                versions.push_back("Auto (Recommended)");
-                if (hasFsr4) {
-                    versions.push_back("Force FSR 4.1.1 (DirectML)");
+                struct VersionOption {
+                    std::string label;
+                    std::string configVal;
+                    uint64_t id = 0;
+                };
+                std::vector<VersionOption> options;
+                options.push_back({"Auto (Recommended)", "Auto", 0});
+
+                bool hasDriver412 = loader::HasFsr412DriverSupport(g_device.Get());
+
+                for (const auto& v : availableVersions) {
+                    std::string formatted = loader::FormatVersionName(v.name);
+                    if (formatted.find("FSR 2") != std::string::npos || v.name.rfind("2.", 0) == 0) {
+                        continue;
+                    }
+                    // FSR 4.1.2 supersedes the SDK DirectML FSR 4.1.1 when the driver provides it.
+                    if (hasDriver412 && formatted.find("4.1.1") != std::string::npos) {
+                        continue;
+                    }
+                    std::string suffix;
+                    if (v.name.find('*') != std::string::npos || formatted.find("4.1.2") != std::string::npos) {
+                        suffix = " (Driver ML - RDNA 2/3/4)";
+                    } else if (formatted.find("FSR 4") != std::string::npos) {
+                        suffix = " (SDK DirectML - RDNA 3/4)";
+                    } else if (formatted.find("FSR 3") != std::string::npos) {
+                        suffix = " (Temporal)";
+                    }
+                    options.push_back({"Force " + formatted + suffix, formatted, v.id});
                 }
-                versions.push_back("Force FSR 3.1.5 (Temporal)");
+
+                std::vector<const char*> cLabels;
+                cLabels.reserve(options.size());
+                for (const auto& opt : options) {
+                    cLabels.push_back(opt.label.c_str());
+                }
 
                 int currentVerIdx = 0;
-                if (g_config.version == "FSR 4" || g_config.version == "4.1" || g_config.version == "FSR4") {
-                    currentVerIdx = hasFsr4 ? 1 : 0;
-                } else if (g_config.version == "FSR 3.1" || g_config.version == "3.1.5" || g_config.version == "FSR3") {
-                    currentVerIdx = hasFsr4 ? 2 : 1;
+                std::string cfgLower = g_config.version;
+                std::transform(cfgLower.begin(), cfgLower.end(), cfgLower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (cfgLower != "auto" && cfgLower != "default" && !cfgLower.empty()) {
+                    uint64_t resolvedId = loader::ResolveVersionId(g_device.Get(), g_config.version);
+                    for (size_t i = 1; i < options.size(); ++i) {
+                        if (options[i].id == resolvedId) {
+                            currentVerIdx = static_cast<int>(i);
+                            break;
+                        }
+                    }
                 }
 
-                if (ImGui::Combo("Engine Version", &currentVerIdx, versions.data(), static_cast<int>(versions.size()))) {
-                    if (hasFsr4) {
-                        if (currentVerIdx == 1) g_config.version = "FSR 4";
-                        else if (currentVerIdx == 2) g_config.version = "FSR 3.1";
-                        else g_config.version = "Auto";
+                if (ImGui::Combo("Engine Version", &currentVerIdx, cLabels.data(), static_cast<int>(cLabels.size()))) {
+                    if (currentVerIdx >= 0 && currentVerIdx < static_cast<int>(options.size())) {
+                        g_config.version = options[currentVerIdx].configVal;
                     } else {
-                        if (currentVerIdx == 1) g_config.version = "FSR 3.1";
-                        else g_config.version = "Auto";
+                        g_config.version = "Auto";
                     }
                     game::ApplyConfig(g_config);
+                    ngx::ResetAllFeatures();
                 }
 
-                if (!hasFsr4) {
-                    ImGui::TextDisabled("Note: FSR 4.1.1 is unavailable on this GPU (requires RDNA 3 / DirectML CS 6.6).");
+                bool fsr412Selected = hasDriver412 && currentVerIdx >= 0 &&
+                                      currentVerIdx < static_cast<int>(options.size()) &&
+                                      (currentVerIdx == 0 ||
+                                       options[currentVerIdx].configVal.find("4.1.2") != std::string::npos);
+                if (fsr412Selected) {
+                    ImGui::Spacing();
+                    static const char* kModelLabels[] = {
+                        "Auto (GPU Default)",
+                        "Standard INT8 (RDNA 3/4 Quality)",
+                        "RDNA 2 INT8-2 (Balanced / Faster)",
+                        "Lite INT8 (FSR4L-i8 - Max FPS)"
+                    };
+                    int currentModel = std::clamp(static_cast<int>(g_config.fsr4Model), 0, 3);
+                    if (ImGui::Combo("FSR 4.1.2 Model", &currentModel, kModelLabels, IM_ARRAYSIZE(kModelLabels))) {
+                        g_config.fsr4Model = static_cast<Fsr4Model>(currentModel);
+                        game::ApplyConfig(g_config);
+                        ngx::ResetAllFeatures();
+                    }
+                    ImGui::TextDisabled("Lite is the fastest; Standard has the best quality. Unsupported choices fall back to Auto.");
+                }
+
+                if (hasFsr4) {
+                    ImGui::TextDisabled("Active ML support: AMD FSR 4 (RDNA 2 RX 6000 / RDNA 3 RX 7000 / RDNA 4 RX 9000).");
+                } else {
+                    ImGui::TextDisabled("Note: AMD FSR 4.1.2 requires AMD Adrenalin 26.10.1+ driver on RDNA 2/3/4 GPUs.");
                 }
 
                 ImGui::Spacing();
@@ -577,6 +635,7 @@ void RenderMainWindow() {
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "ADVANCED RENDERING");
                 if (ImGui::Checkbox("Dynamic Auto Exposure", &g_config.autoExposure)) {
                     game::ApplyConfig(g_config);
+                    ngx::ResetAllFeatures();
                 }
                 ImGui::TextDisabled("Allows FSR to compute its own exposure luminance buffer dynamically.");
 
@@ -608,9 +667,7 @@ void RenderMainWindow() {
                 }
 
                 ImGui::Spacing();
-                if (ImGui::Checkbox("Enable Anti-Lag 2", &g_config.antiLag2)) {
-                    antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
-                }
+                ImGui::Checkbox("Enable Anti-Lag 2", &g_config.antiLag2);
                 ImGui::TextDisabled("Synchronizes CPU input polling with GPU execution to minimize click-to-photon latency.");
 
                 if (active) {
@@ -624,9 +681,7 @@ void RenderMainWindow() {
                 ImGui::Spacing();
 
                 ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "DRIVER FRAME PACING");
-                if (ImGui::SliderInt("Driver Max FPS", &g_config.antiLagMaxFps, 0, 240, g_config.antiLagMaxFps == 0 ? "Unlimited" : "%d FPS")) {
-                    antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
-                }
+                ImGui::SliderInt("Driver Max FPS", &g_config.antiLagMaxFps, 0, 240, g_config.antiLagMaxFps == 0 ? "Unlimited" : "%d FPS");
                 ImGui::TextDisabled("Driver-level frame rate limiter. Ensures stable frame pacing without queue bloat.");
 
                 ImGui::EndTabItem();
@@ -801,13 +856,8 @@ HRESULT PresentWithOverlay(IDXGISwapChain3* swapChain, UINT syncInterval, UINT f
         g_initialized = true;
     }
 
-    static uint64_t s_lastFrame = 0;
-    uint64_t frame = game::Frame();
-    if (frame != 0 && frame == s_lastFrame) {
-        return CallRealPresent(swapChain, syncInterval, flags, pPresentParameters);
-    }
-    s_lastFrame = frame;
-
+    bool profilerNeeded = g_showMenu || (g_config.showOsd && g_config.showLatencyOsd);
+    telemetry::SetProfilerActive(profilerNeeded);
     telemetry::OnRealFramePresent(cmdQueue);
 
     bool drawUi = (g_showMenu || g_config.showOsd);

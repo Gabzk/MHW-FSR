@@ -3,7 +3,10 @@
 #include <d3d12.h>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "config.h"
 
 namespace mhwfsr::loader {
 
@@ -11,6 +14,9 @@ struct FsrVersionInfo {
     uint64_t id = 0;
     std::string name;
 };
+
+// Formats a raw provider version name (e.g. "4.1.2 *" -> "FSR 4.1.2", "3.1.5" -> "FSR 3.1.5").
+std::string FormatVersionName(std::string_view rawName);
 
 // Initializes the FSR loader DLL paths. Call during plugin startup.
 bool Init(const std::wstring& pluginDir, const std::wstring& customDllPath);
@@ -21,11 +27,20 @@ std::vector<FsrVersionInfo> QueryVersions(ID3D12Device* device);
 // Checks if FSR 4 (DirectML/ML-based) is supported by the hardware and driver.
 bool HasFsr4Support(ID3D12Device* device);
 
+// Checks if the AMD driver's FSR 4.1.2+ provider (amdxcffx64.dll) is available.
+bool HasFsr412DriverSupport(ID3D12Device* device);
+
+// Applies the selected internal neural model variant for FSR 4.1.2 (Auto, Standard, RDNA2, Lite).
+void ApplyFsr4ModelOverride(Fsr4Model model);
+
+// Inspects a created ffx::Context and returns the active FSR 4.1.2 internal model label ("FP8", "INT8", "RDNA2", "Lite"), or empty.
+std::string DescribeActiveFsr4Model(const void* ffxContext);
+
 // Checks if AMD FidelityFX Frame Generation is supported by the hardware and runtime.
 bool HasFrameGenSupport(ID3D12Device* device);
 
-// Resolves a version name or config string (e.g., "Auto", "FSR3", "FSR4", or hex ID) to an override ID.
-// Returns 0 for "Auto" (default behavior).
+// Resolves a version name or config string (e.g., "Auto", "FSR3", "FSR4", "4.1.2", "4.1.1", or hex ID) to an override ID.
+// Returns 0 for "Auto" fallback if no versions are found.
 uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr);
 
 }  // namespace mhwfsr::loader

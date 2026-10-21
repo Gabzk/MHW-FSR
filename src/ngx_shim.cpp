@@ -14,6 +14,7 @@
 #include <mutex>
 #include <vector>
 
+#include "antilag.h"
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_context.h"
@@ -262,7 +263,7 @@ void LogEvaluation(Feature& f, bool success, unsigned renderW, unsigned renderH,
     } else if (g_config.verboseFrames && n < 40) {
         LOGD("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, jx, jy, frame, reset);
     } else if ((n & (n - 1)) == 0) {
-        Log(n == 512 ? LogLevel::Info : LogLevel::Debug,
+        Log((n == 512 || (n % 4096) == 0) ? LogLevel::Info : LogLevel::Debug,
             "{} evaluate #{} ok ({} resets since #{}; {})",
             f.Name(), n, f.resets, n / 2, game::JitterStats());
         f.resets = 0;
@@ -296,7 +297,10 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     float scale = game::RenderScale();
     float jx = (jitter ? jitter->x : 0.0f) * g_config.jitterScaleX * scale;
     float jy = (jitter ? jitter->y : 0.0f) * g_config.jitterScaleY * scale;
-    int reset = GetI(p, NVSDK_NGX_Parameter_Reset) || (jitter && jitter->cut && g_config.cutReset);
+    // Ignore transient NVSDK_NGX_Parameter_Reset pulses from the engine's legacy TAA filter during
+    // steady-state combat (radial blur / hit-stop blend=0 pulses). Only reset on first evaluation,
+    // explicit config/preset reload (f.resetNext), or verified camera position teleports (jitter->cut).
+    int reset = (f.evaluations == 0) || (jitter && jitter->cut && g_config.cutReset);
     if (f.resetNext) {
         f.resetNext = false;
         reset = 1;
@@ -367,6 +371,7 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     s.upscaleH = outputInfo.height;
     s.flags = flags;
     s.versionId = versionId;
+    s.modelOverride = static_cast<uint32_t>(g_config.fsr4Model);
 
     if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
 
@@ -390,7 +395,7 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     dp.frameTimeDeltaMs = GetFrameDeltaTimeMs();
     dp.preExposure = g_config.preExposure;
     dp.cameraNear = jitter ? jitter->cameraNear : 0.1f;
-    dp.cameraFar = jitter ? jitter->cameraFar : 10000.0f;
+    dp.cameraFar = jitter ? jitter->cameraFar : 1000.0f;
     dp.cameraFovAngleVertical = jitter ? jitter->fovY : 0.785398f;
     dp.reset = (reset != 0);
 
@@ -455,7 +460,7 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
     unsigned inH = std::min(rect.height, g_upscale.height);
     float jx = g_upscale.jitterX;
     float jy = g_upscale.jitterY;
-    int reset = g_upscale.reset;
+    int reset = (f.evaluations == 0) || g_upscale.reset;
     if (f.resetNext) {
         f.resetNext = false;
         reset = 1;
@@ -482,6 +487,7 @@ NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Paramete
     s.upscaleH = outputInfo.height;
     s.flags = flags;
     s.versionId = versionId;
+    s.modelOverride = static_cast<uint32_t>(g_config.fsr4Model);
 
     if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
 
@@ -796,50 +802,76 @@ void AdoptContext(bool /*mayUseDxgi*/) {
     LOGI("Created game DLSS context and enabled feature bits for MHW-FSR");
 }
 
+bool NeedsPatch(const ApiState& s) {
+    return s.table && s.table->create != s.shim.create;
+}
+
+bool NeedsAdopt() {
+    game::DlssContext* ctx = game::Context();
+    if (ctx) return ctx->params != &g_params;
+    return !g_contextCreated && !g_fallbackChecked && game::Device() != nullptr;
+}
+
+bool NeedsDlispAttach() {
+    if (!game::DlispActive()) return false;
+    game::DlssContext* ctx = game::Context();
+    return ctx && !ctx->dlispHandle;
+}
+
 void OnFrameStart() {
-    std::lock_guard lock(g_mutex);
-    PatchTable(g_api[0], Api::D3D11, false);
-    PatchTable(g_api[1], Api::D3D12, false);
-    if (!g_contextCreated) {
+    // Run Anti-Lag 2 pacing at the very start of sMhMain::Update, BEFORE the game's
+    // internal 60 FPS frame limiter and BEFORE waking the render thread for Frame N-1.
+    antilag::Update(g_config.antiLag2, static_cast<uint32_t>(g_config.antiLagMaxFps));
+
+    game::ForceEnableDlssSupport();
+    if (NeedsPatch(g_api[0]) || NeedsPatch(g_api[1]) || NeedsAdopt()) {
+        std::lock_guard lock(g_mutex);
+        PatchTable(g_api[0], Api::D3D11, false);
+        PatchTable(g_api[1], Api::D3D12, false);
         AdoptContext(false);
-    } else {
-        game::ForceEnableDlssSupport();
     }
     overlay::TryInstall();
 }
 
 void OnFrame() {
-    std::lock_guard lock(g_mutex);
-    PatchTable(g_api[0], Api::D3D11, false);
-    PatchTable(g_api[1], Api::D3D12, false);
-    AdoptContext(true);
-    overlay::TryInstall();
-
-    if (game::DlispActive()) {
-        game::DlssContext* ctx = game::Context();
-        if (ctx && !ctx->dlispHandle) {
-            Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
-            ctx->dlispHandle = AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, nullptr)->Handle();
-            LOGD("Attached DLISP feature for upscaling mode");
+    game::ForceEnableDlssSupport();
+    if (NeedsPatch(g_api[0]) || NeedsPatch(g_api[1]) || NeedsAdopt() || NeedsDlispAttach()) {
+        std::lock_guard lock(g_mutex);
+        PatchTable(g_api[0], Api::D3D11, false);
+        PatchTable(g_api[1], Api::D3D12, false);
+        AdoptContext(true);
+        if (game::DlispActive()) {
+            game::DlssContext* ctx = game::Context();
+            if (ctx && !ctx->dlispHandle) {
+                Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
+                ctx->dlispHandle = AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, nullptr)->Handle();
+                LOGD("Attached DLISP feature for upscaling mode");
+            }
         }
     }
+    overlay::TryInstall();
 }
 
 void ReloadSettings(bool& recompute);
 
 void OnUpdate() {
+    game::ForceEnableDlssSupport();
+    d3d::RetireTick(game::Frame());
+
     bool recompute = false;
-    {
+    static ULONGLONG nextReload = 0;
+    ULONGLONG now = GetTickCount64();
+    bool checkReload = (now >= nextReload);
+    if (checkReload) {
+        nextReload = now + 500;
+    }
+
+    if (NeedsPatch(g_api[0]) || NeedsPatch(g_api[1]) || NeedsAdopt() || checkReload) {
         std::lock_guard lock(g_mutex);
         PatchTable(g_api[0], Api::D3D11, false);
         PatchTable(g_api[1], Api::D3D12, false);
         AdoptContext(true);
-        d3d::RetireTick(game::Frame());
-
-        static ULONGLONG nextReload = 0;
-        ULONGLONG now = GetTickCount64();
-        if (now >= nextReload) {
-            nextReload = now + 500;
+        if (checkReload) {
             ReloadSettings(recompute);
         }
     }
@@ -903,6 +935,13 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
 }
 
 }  // namespace
+
+void ResetAllFeatures() {
+    std::lock_guard lock(g_mutex);
+    for (auto& f : g_features) {
+        f->resetNext = true;
+    }
+}
 
 bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
     if (!InstallTables(dataDir, gameDir)) return false;

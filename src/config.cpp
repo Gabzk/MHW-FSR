@@ -61,13 +61,22 @@ constexpr wchar_t kDefaultIni[] =
     L"; -----------------------------------------------------------------------------\n"
     L"; Version: Upscaler version from the AMD FidelityFX API.\n"
     L"; Options:\n"
-    L";   Auto      -> Recommended. Automatically detects your GPU:\n"
-    L";                - RDNA 3 (e.g. RX 7000 series) & RDNA 4: runs FSR 4 (ML/DirectML).\n"
-    L";                - Pre-RDNA 3 (RX 6000, 5000, Intel, Nvidia): runs FSR 3.1.5 (Temporal).\n"
-    L";   FSR 4     -> Forces the FSR 4 Machine Learning upscaler (also accepts: 4.1, FSR4).\n"
-    L";   FSR 3.1   -> Forces the FSR 3.1 temporal upscaler (also accepts: 3.1.5, FSR3).\n"
+    L";   Auto      -> Recommended. Automatically detects your GPU & driver:\n"
+    L";                - RDNA 2 (RX 6000), RDNA 3 (RX 7000) & RDNA 4 (RX 9000): runs FSR 4.1.2 (Driver ML).\n"
+    L";                - Other GPUs (RX 5000, Intel, Nvidia): runs FSR 3.1.5 (Temporal).\n"
+    L";   FSR 4.1.2 -> Forces the AMD driver FSR 4.1.2 Machine Learning upscaler (RDNA 2/3/4).\n"
+    L";   FSR 3.1.5 -> Forces the FSR 3.1.5 temporal upscaler (all DX12 GPUs).\n"
     L";   0x...     -> Exact hexadecimal provider ID listed in MHW-FSR.log.\n"
     L"Version=Auto\n"
+    L"\n"
+    L"; -----------------------------------------------------------------------------\n"
+    L"; Fsr4Model: Internal neural network model variant when running FSR 4.1.2.\n"
+    L"; Options:\n"
+    L";   Auto      -> Uses the GPU architecture default (FP8 on RX 9000, INT8 on RX 7000, INT8-2 on RX 6000).\n"
+    L";   Standard  -> Forces FSR4-i8 (WMMA INT8 - RDNA 3/4 highest quality).\n"
+    L";   RDNA2     -> Forces FSR4-i8-2 (DP4A INT8 - RDNA 2/3/4 faster balanced model).\n"
+    L";   Lite      -> Forces FSR4L-i8 (DP4A INT8 Lite - ~45% faster upscale on RDNA 2/3/4).\n"
+    L"Fsr4Model=Auto\n"
     L"\n"
     L"; -----------------------------------------------------------------------------\n"
     L"; Sharpness: Integrated post-upscale sharpening (AMD FidelityFX RCAS).\n"
@@ -80,9 +89,9 @@ constexpr wchar_t kDefaultIni[] =
     L"\n"
     L"; -----------------------------------------------------------------------------\n"
     L"; AutoExposure: Automatic exposure estimation by FSR.\n"
-    L";   0 = Off (uses MT Framework engine's internal exposure/luminance buffer).\n"
-    L";   1 = On  (allows FSR to compute its own exposure dynamically).\n"
-    L"AutoExposure=0\n"
+    L";   1 = On  (Recommended; allows FSR to compute its own HDR luminance exposure dynamically).\n"
+    L";   0 = Off (Disables internal auto-exposure).\n"
+    L"AutoExposure=1\n"
     L"\n"
     L"; -----------------------------------------------------------------------------\n"
     L"; DLLPath: Directory containing amd_fidelityfx_loader_dx12.dll & amd_fidelityfx_upscaler_dx12.dll.\n"
@@ -214,6 +223,16 @@ const char* QualityModeName(QualityMode mode) {
     return "?";
 }
 
+const char* Fsr4ModelName(Fsr4Model model) {
+    switch (model) {
+        case Fsr4Model::Auto: return "Auto";
+        case Fsr4Model::Standard: return "Standard";
+        case Fsr4Model::Rdna2: return "RDNA2";
+        case Fsr4Model::Lite: return "Lite";
+    }
+    return "Auto";
+}
+
 void LoadConfig(const std::wstring& ini) {
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::ofstream out(ini, std::ios::binary);
@@ -253,6 +272,17 @@ void LoadConfig(const std::wstring& ini) {
 
     c.autoExposure = ReadBool(ini, L"FSR", L"AutoExposure", c.autoExposure);
     c.version = Narrow(ReadString(ini, L"FSR", L"Version", L"Auto"));
+
+    auto modelStr = Lower(ReadString(ini, L"FSR", L"Fsr4Model", L"auto"));
+    if (modelStr == L"standard" || modelStr == L"fsr4-i8" || modelStr == L"int8" || modelStr == L"rdna3")
+        c.fsr4Model = Fsr4Model::Standard;
+    else if (modelStr == L"rdna2" || modelStr == L"fsr4-i8-2" || modelStr == L"int8-2" || modelStr == L"balanced" || modelStr == L"fast")
+        c.fsr4Model = Fsr4Model::Rdna2;
+    else if (modelStr == L"lite" || modelStr == L"fsr4l-i8" || modelStr == L"fsr4l")
+        c.fsr4Model = Fsr4Model::Lite;
+    else
+        c.fsr4Model = Fsr4Model::Auto;
+
     c.dllPath = ReadString(ini, L"FSR", L"DLLPath", L"");
     c.bypass = ReadBool(ini, L"FSR", L"Bypass", c.bypass);
 
@@ -340,6 +370,7 @@ void SaveConfig(const Config& c) {
     writeFloat(L"FSR", L"Sharpness", c.sharpness);
     writeBool(L"FSR", L"AutoExposure", c.autoExposure);
     writeStr(L"FSR", L"Version", Widen(c.version));
+    writeStr(L"FSR", L"Fsr4Model", Widen(Fsr4ModelName(c.fsr4Model)));
     writeBool(L"FSR", L"Bypass", c.bypass);
     writeBool(L"AntiLag", L"AntiLag2", c.antiLag2);
     writeFloat(L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps));
