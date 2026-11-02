@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <mutex>
@@ -18,7 +19,6 @@
 #include "antilag.h"
 #include "config.h"
 #include "d3d_util.h"
-#include "framegen.h"
 #include "fsr_context.h"
 #include "fsr_loader.h"
 #include "game.h"
@@ -114,7 +114,8 @@ void ApplyTheme() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
-    style.WindowRounding = 6.0f;
+    style.WindowRounding = 8.0f;
+    style.ChildRounding = 6.0f;
     style.FrameRounding = 4.0f;
     style.PopupRounding = 5.0f;
     style.ScrollbarRounding = 6.0f;
@@ -122,56 +123,52 @@ void ApplyTheme() {
     style.TabRounding = 5.0f;
 
     style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
     style.FrameBorderSize = 0.0f;
     style.PopupBorderSize = 1.0f;
 
-    style.WindowPadding = ImVec2(14.0f, 14.0f);
-    style.FramePadding = ImVec2(10.0f, 6.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
-    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    style.WindowPadding = ImVec2(16.0f, 14.0f);
+    style.FramePadding = ImVec2(9.0f, 5.0f);
+    style.ItemSpacing = ImVec2(8.0f, 7.0f);
+    style.ItemInnerSpacing = ImVec2(6.0f, 5.0f);
+    style.CellPadding = ImVec2(6.0f, 5.0f);
 
     // Deep Obsidian Dark Base
-    colors[ImGuiCol_Text]                  = ImVec4(0.96f, 0.96f, 0.97f, 1.00f);
-    colors[ImGuiCol_TextDisabled]          = ImVec4(0.55f, 0.55f, 0.60f, 1.00f);
-    colors[ImGuiCol_WindowBg]              = ImVec4(0.09f, 0.09f, 0.11f, 0.96f);
-    colors[ImGuiCol_ChildBg]               = ImVec4(0.12f, 0.12f, 0.14f, 0.80f);
-    colors[ImGuiCol_PopupBg]               = ImVec4(0.11f, 0.11f, 0.13f, 0.98f);
-    colors[ImGuiCol_Border]                = ImVec4(0.24f, 0.24f, 0.28f, 0.70f);
+    colors[ImGuiCol_Text]                  = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
+    colors[ImGuiCol_TextDisabled]          = ImVec4(0.52f, 0.54f, 0.60f, 1.00f);
+    colors[ImGuiCol_WindowBg]              = ImVec4(0.08f, 0.08f, 0.10f, 0.97f);
+    colors[ImGuiCol_ChildBg]               = ImVec4(0.11f, 0.11f, 0.14f, 0.90f);
+    colors[ImGuiCol_PopupBg]               = ImVec4(0.10f, 0.10f, 0.13f, 0.98f);
+    colors[ImGuiCol_Border]                = ImVec4(0.22f, 0.22f, 0.27f, 0.75f);
     colors[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
     // Dark Card Elements
-    colors[ImGuiCol_FrameBg]               = ImVec4(0.16f, 0.16f, 0.19f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]        = ImVec4(0.22f, 0.22f, 0.26f, 1.00f);
+    colors[ImGuiCol_FrameBg]               = ImVec4(0.16f, 0.16f, 0.20f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]        = ImVec4(0.22f, 0.22f, 0.27f, 1.00f);
     colors[ImGuiCol_FrameBgActive]         = ImVec4(0.26f, 0.26f, 0.32f, 1.00f);
-    colors[ImGuiCol_TitleBg]               = ImVec4(0.11f, 0.11f, 0.13f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]         = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
+    colors[ImGuiCol_TitleBg]               = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]         = ImVec4(0.13f, 0.13f, 0.16f, 1.00f);
     colors[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.08f, 0.08f, 0.10f, 0.85f);
-    colors[ImGuiCol_MenuBarBg]             = ImVec4(0.13f, 0.13f, 0.16f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]             = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
 
     // AMD FidelityFX Ruby Red Accents
     colors[ImGuiCol_CheckMark]             = ImVec4(0.92f, 0.18f, 0.24f, 1.00f);
     colors[ImGuiCol_SliderGrab]            = ImVec4(0.85f, 0.15f, 0.22f, 1.00f);
     colors[ImGuiCol_SliderGrabActive]      = ImVec4(1.00f, 0.25f, 0.32f, 1.00f);
-    colors[ImGuiCol_Button]                = ImVec4(0.78f, 0.14f, 0.20f, 0.88f);
+    colors[ImGuiCol_Button]                = ImVec4(0.78f, 0.14f, 0.20f, 0.90f);
     colors[ImGuiCol_ButtonHovered]         = ImVec4(0.92f, 0.18f, 0.25f, 1.00f);
     colors[ImGuiCol_ButtonActive]          = ImVec4(1.00f, 0.28f, 0.35f, 1.00f);
-    colors[ImGuiCol_Header]                = ImVec4(0.78f, 0.14f, 0.20f, 0.65f);
-    colors[ImGuiCol_HeaderHovered]         = ImVec4(0.88f, 0.16f, 0.22f, 0.85f);
-    colors[ImGuiCol_HeaderActive]          = ImVec4(0.98f, 0.22f, 0.28f, 1.00f);
+    colors[ImGuiCol_Header]                = ImVec4(0.18f, 0.18f, 0.22f, 0.90f);
+    colors[ImGuiCol_HeaderHovered]         = ImVec4(0.24f, 0.24f, 0.29f, 1.00f);
+    colors[ImGuiCol_HeaderActive]          = ImVec4(0.28f, 0.28f, 0.34f, 1.00f);
 
-    colors[ImGuiCol_Separator]             = ImVec4(0.22f, 0.22f, 0.26f, 0.70f);
+    colors[ImGuiCol_Separator]             = ImVec4(0.22f, 0.22f, 0.27f, 0.65f);
     colors[ImGuiCol_SeparatorHovered]      = ImVec4(0.85f, 0.15f, 0.22f, 0.85f);
     colors[ImGuiCol_SeparatorActive]       = ImVec4(0.95f, 0.20f, 0.28f, 1.00f);
 
     colors[ImGuiCol_ResizeGrip]            = ImVec4(0.85f, 0.15f, 0.22f, 0.40f);
     colors[ImGuiCol_ResizeGripHovered]     = ImVec4(0.95f, 0.20f, 0.28f, 0.75f);
     colors[ImGuiCol_ResizeGripActive]      = ImVec4(1.00f, 0.28f, 0.35f, 1.00f);
-
-    colors[ImGuiCol_Tab]                   = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
-    colors[ImGuiCol_TabHovered]            = ImVec4(0.85f, 0.15f, 0.22f, 0.80f);
-    colors[ImGuiCol_TabActive]             = ImVec4(0.80f, 0.14f, 0.20f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]          = ImVec4(0.11f, 0.11f, 0.13f, 1.00f);
-    colors[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
 }
 
 LRESULT CALLBACK HookWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -367,7 +364,6 @@ bool InitD3D12(IDXGISwapChain3* swapChain) {
     ImGui_ImplDX12_InitInfo initInfo = {};
     initInfo.Device = g_device.Get();
     initInfo.CommandQueue = cmdQueue;
-    // Double the frame resources so rendering ImGui on both Interpolated and Real frames never collides
     initInfo.NumFramesInFlight = std::max<int>(static_cast<int>(g_bufferCount) * 2, 6);
     initInfo.RTVFormat = desc.BufferDesc.Format;
     initInfo.SrvDescriptorHeap = g_srvHeap.Get();
@@ -484,348 +480,405 @@ void RenderOsdBadge() {
     ImGui::End();
 }
 
+void DrawSectionHeader(const char* title, const char* rightText = nullptr, ImVec4 rightColor = ImVec4(0.6f, 0.6f, 0.65f, 1.0f)) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.20f, 0.27f, 1.0f));
+    ImGui::TextUnformatted(title);
+    ImGui::PopStyleColor();
+    if (rightText && rightText[0] != '\0') {
+        float textW = ImGui::CalcTextSize(rightText).x;
+        float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > textW + 10.0f) {
+            ImGui::SameLine(ImGui::GetCursorPosX() + avail - textW);
+            ImGui::TextColored(rightColor, "%s", rightText);
+        }
+    }
+    ImGui::Separator();
+}
+
+bool SegmentedButton(const char* label, bool active, float width = 0.0f) {
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.86f, 0.16f, 0.22f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.94f, 0.20f, 0.27f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.00f, 0.26f, 0.33f, 1.00f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.16f, 0.20f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.24f, 0.29f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.36f, 1.00f));
+    }
+    bool pressed = ImGui::Button(label, ImVec2(width, 0.0f));
+    ImGui::PopStyleColor(3);
+    return pressed;
+}
+
 void RenderMainWindow() {
     if (!g_showMenu) return;
 
-    ImGui::SetNextWindowSize(ImVec2(590.0f, 560.0f), ImGuiCond_FirstUseEver);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavFocus;
+    ImGui::SetNextWindowSize(ImVec2(620.0f, 0.0f), ImGuiCond_Always);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavFocus;
 
     if (ImGui::Begin("MHW-FSR :: AMD FidelityFX Control Center", &g_showMenu, flags)) {
         bool dlssOn = game::DlssEnabledInGame();
         float currentScale = game::RenderScale();
         telemetry::Metrics m = telemetry::GetMetrics();
 
-        // Header Status Banner
-        ImGui::BeginChild("StatusHeader", ImVec2(0, 72), true);
-        {
+        float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
+        float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
+        float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+
+        // 1. Top Status Bar (4-Column Live Telemetry Strip)
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.11f, 0.14f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+        ImGui::BeginChild("StatusStrip", ImVec2(0, 56), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 2.0f));
+        if (ImGui::BeginTable("StatusGrid", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+            ImGui::TableSetupColumn("Resolution", ImGuiTableColumnFlags_WidthStretch, 1.45f);
+            ImGui::TableSetupColumn("Framerate", ImGuiTableColumnFlags_WidthStretch, 1.20f);
+            ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthStretch, 0.80f);
+
+            ImGui::TableNextRow();
+
+            // Col 0: Engine Status
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("STATUS");
             if (dlssOn) {
-                ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "[ACTIVE] %s", ActiveFsrVersion().c_str());
-                ImGui::SameLine();
-                ImGui::TextDisabled("|");
-                ImGui::SameLine();
-                ImGui::Text("Scale: %.1f%% (%s)", currentScale * 100.0f, QualityModeName(g_config.mode));
+                ImGui::TextColored(ImVec4(0.25f, 0.92f, 0.48f, 1.0f), "%s", ActiveFsrVersion().c_str());
             } else {
-                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "[PAUSED] UPSCALING PAUSED");
-                ImGui::SameLine();
-                ImGui::TextDisabled("|");
-                ImGui::SameLine();
-                ImGui::Text("Enable 'NVIDIA DLSS' in game Display Settings to activate");
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "DLSS OFF in Game");
             }
 
-            float baseFps = m.baseFps > 0.1f ? m.baseFps : ImGui::GetIO().Framerate;
-            float dispFps = m.presentedFps > 0.1f ? m.presentedFps : baseFps;
-            float dispDt = m.presentedFrameTimeMs > 0.1f ? m.presentedFrameTimeMs : (1000.0f / std::max(1.0f, dispFps));
+            // Col 1: Active Resolution
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("RESOLUTION (%s)", QualityModeName(g_config.mode));
+            if (g_swapChainWidth > 0 && g_swapChainHeight > 0) {
+                unsigned renW = std::max(1u, static_cast<unsigned>(std::lround(g_swapChainWidth * currentScale)));
+                unsigned renH = std::max(1u, static_cast<unsigned>(std::lround(g_swapChainHeight * currentScale)));
+                ImGui::Text("%ux%u -> %ux%u", renW, renH, g_swapChainWidth, g_swapChainHeight);
+            } else {
+                ImGui::Text("%.0f%% Scale", currentScale * 100.0f);
+            }
 
-            ImGui::Text("Framerate: ");
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "%.1f FPS (%.2f ms)", dispFps, dispDt);
-            ImGui::SameLine();
-            ImGui::TextDisabled(" | ");
-            ImGui::SameLine();
-            ImGui::Text("PC Latency: ");
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%.1f ms", m.inputToPresentMs);
+            // Col 2: Framerate
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextDisabled("FRAMERATE");
+            ImGui::TextColored(ImVec4(0.38f, 0.86f, 1.0f, 1.0f), "%.1f FPS (%.1f ms)", dispFps, dispDt);
+
+            // Col 3: PC Latency
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextDisabled("PC LATENCY");
+            ImGui::TextColored(ImVec4(0.96f, 0.80f, 0.32f, 1.0f), "%.1f ms", m.inputToPresentMs);
+
+            ImGui::EndTable();
         }
+        ImGui::PopStyleVar();
         ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
 
         ImGui::Spacing();
 
-        if (ImGui::BeginTabBar("FSRTabs")) {
-            // Tab 1: Upscaling & Quality
-            if (ImGui::BeginTabItem("Upscaling & Resolution")) {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "QUALITY PRESET");
+        // 2. Section: Super Resolution & Upscaler
+        auto availableVersions = loader::QueryVersions(g_device.Get());
+        bool hasFsr4 = loader::HasFsr4Support(g_device.Get());
+        bool hasDriver412 = loader::HasFsr412DriverSupport(g_device.Get());
 
-                const char* presets[] = {
-                    "NativeAA (1.0x)",
-                    "Quality (1.5x)",
-                    "Balanced (1.7x)",
-                    "Performance (2.0x)",
-                    "Ultra Performance (3.0x)",
-                    "Custom"
-                };
+        DrawSectionHeader("FIDELITYFX SUPER RESOLUTION",
+                          hasFsr4 ? "RDNA ML Active" : "Temporal Upscaler",
+                          hasFsr4 ? ImVec4(0.25f, 0.90f, 0.45f, 1.0f) : ImVec4(0.60f, 0.62f, 0.68f, 1.0f));
 
-                int currentPreset = static_cast<int>(g_config.mode);
-                if (ImGui::Combo("Preset", &currentPreset, presets, IM_ARRAYSIZE(presets))) {
-                    g_config.mode = static_cast<QualityMode>(currentPreset);
-                    game::ApplyConfig(g_config);
-                    game::RecomputeRenderScale();
-                    ngx::ResetAllFeatures();
+        if (ImGui::BeginTable("FsrControlsTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+            ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch);
+
+            // Row 1: Engine Version
+            struct VersionOption {
+                std::string label;
+                std::string configVal;
+                uint64_t id = 0;
+            };
+            std::vector<VersionOption> options;
+            options.push_back({"Auto (Recommended)", "Auto", 0});
+
+            for (const auto& v : availableVersions) {
+                std::string formatted = loader::FormatVersionName(v.name);
+                if (formatted.find("FSR 2") != std::string::npos || v.name.rfind("2.", 0) == 0) {
+                    continue;
                 }
+                if (hasDriver412 && formatted.find("4.1.1") != std::string::npos) {
+                    continue;
+                }
+                std::string suffix;
+                if (v.name.find('*') != std::string::npos || formatted.find("4.1.2") != std::string::npos) {
+                    suffix = " (Driver ML - RDNA 2/3/4)";
+                } else if (formatted.find("FSR 4") != std::string::npos) {
+                    suffix = " (SDK DirectML - RDNA 3/4)";
+                } else if (formatted.find("FSR 3") != std::string::npos) {
+                    suffix = " (Temporal)";
+                }
+                options.push_back({formatted + suffix, formatted, v.id});
+            }
 
-                if (g_config.mode == QualityMode::Custom) {
-                    ImGui::Spacing();
-                    if (ImGui::SliderFloat("Custom Scale", &g_config.customScale, 0.50f, 1.00f, "%.2fx")) {
-                        game::ApplyConfig(g_config);
+            std::vector<const char*> cLabels;
+            cLabels.reserve(options.size());
+            for (const auto& opt : options) {
+                cLabels.push_back(opt.label.c_str());
+            }
+
+            int currentVerIdx = 0;
+            std::string cfgLower = g_config.version;
+            std::transform(cfgLower.begin(), cfgLower.end(), cfgLower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (cfgLower != "auto" && cfgLower != "default" && !cfgLower.empty()) {
+                uint64_t resolvedId = loader::ResolveVersionId(g_device.Get(), g_config.version);
+                for (size_t i = 1; i < options.size(); ++i) {
+                    if (options[i].id == resolvedId) {
+                        currentVerIdx = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Upscaler Engine");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("##EngineVersion", &currentVerIdx, cLabels.data(), static_cast<int>(cLabels.size()))) {
+                if (currentVerIdx >= 0 && currentVerIdx < static_cast<int>(options.size())) {
+                    g_config.version = options[currentVerIdx].configVal;
+                } else {
+                    g_config.version = "Auto";
+                }
+                ngx::ResetAllFeatures();
+            }
+
+            // Row 2: FSR 4.1.2 Model (when applicable)
+            bool fsr412Selected = hasDriver412 && currentVerIdx >= 0 &&
+                                  currentVerIdx < static_cast<int>(options.size()) &&
+                                  (currentVerIdx == 0 ||
+                                   options[currentVerIdx].configVal.find("4.1.2") != std::string::npos);
+            if (fsr412Selected) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("FSR 4.1.2 Model");
+                ImGui::TableSetColumnIndex(1);
+
+                static const char* kModelPills[] = {"Auto", "Standard", "RDNA2 INT8", "Lite (Fast)"};
+                int currentModel = std::clamp(static_cast<int>(g_config.fsr4Model), 0, 3);
+                float availW = ImGui::GetContentRegionAvail().x;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+                float btnW = (availW - spacing * 3.0f) / 4.0f;
+                for (int i = 0; i < 4; ++i) {
+                    if (i > 0) ImGui::SameLine();
+                    if (SegmentedButton(kModelPills[i], currentModel == i, btnW)) {
+                        g_config.fsr4Model = static_cast<Fsr4Model>(i);
+                        ngx::ResetAllFeatures();
+                    }
+                }
+            }
+
+            // Row 3: Quality Preset (Segmented Pill Bar)
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Quality Preset");
+            ImGui::TableSetColumnIndex(1);
+            {
+                static const char* kPresetPills[] = {"NativeAA", "Quality", "Balanced", "Perf", "Custom"};
+                int currentPreset = std::clamp(static_cast<int>(g_config.mode), 0, 4);
+                float availW = ImGui::GetContentRegionAvail().x;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+                float btnW = (availW - spacing * 4.0f) / 5.0f;
+                for (int i = 0; i < 5; ++i) {
+                    if (i > 0) ImGui::SameLine();
+                    if (SegmentedButton(kPresetPills[i], currentPreset == i, btnW)) {
+                        g_config.mode = static_cast<QualityMode>(i);
                         game::RecomputeRenderScale();
                         ngx::ResetAllFeatures();
                     }
                 }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "RCAS SHARPNESS");
-                if (ImGui::SliderFloat("Sharpness", &g_config.sharpness, 0.0f, 1.0f, "%.2f")) {
-                    game::ApplyConfig(g_config);
-                }
-
-                // Quick Sharpness Buttons
-                if (ImGui::Button("Off (0.0)")) { g_config.sharpness = 0.0f; game::ApplyConfig(g_config); }
-                ImGui::SameLine();
-                if (ImGui::Button("Subtle (0.33)")) { g_config.sharpness = 0.33f; game::ApplyConfig(g_config); }
-                ImGui::SameLine();
-                if (ImGui::Button("Moderate (0.66)")) { g_config.sharpness = 0.66f; game::ApplyConfig(g_config); }
-                ImGui::SameLine();
-                if (ImGui::Button("Crisp (1.0)")) { g_config.sharpness = 1.0f; game::ApplyConfig(g_config); }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "ON-SCREEN DISPLAY (OSD)");
-                ImGui::Checkbox("Show Corner Overlay (OSD)", &g_config.showOsd);
-                ImGui::SameLine();
-                ImGui::Checkbox("Show FPS Counter", &g_config.showFps);
-
-                ImGui::EndTabItem();
             }
 
-            // Tab 2: FidelityFX Core
-            if (ImGui::BeginTabItem("FidelityFX Core")) {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "UPSCALER ARCHITECTURE");
-
-                auto availableVersions = loader::QueryVersions(g_device.Get());
-                bool hasFsr4 = loader::HasFsr4Support(g_device.Get());
-
-                struct VersionOption {
-                    std::string label;
-                    std::string configVal;
-                    uint64_t id = 0;
-                };
-                std::vector<VersionOption> options;
-                options.push_back({"Auto (Recommended)", "Auto", 0});
-
-                bool hasDriver412 = loader::HasFsr412DriverSupport(g_device.Get());
-
-                for (const auto& v : availableVersions) {
-                    std::string formatted = loader::FormatVersionName(v.name);
-                    if (formatted.find("FSR 2") != std::string::npos || v.name.rfind("2.", 0) == 0) {
-                        continue;
-                    }
-                    // FSR 4.1.2 supersedes the SDK DirectML FSR 4.1.1 when the driver provides it.
-                    if (hasDriver412 && formatted.find("4.1.1") != std::string::npos) {
-                        continue;
-                    }
-                    std::string suffix;
-                    if (v.name.find('*') != std::string::npos || formatted.find("4.1.2") != std::string::npos) {
-                        suffix = " (Driver ML - RDNA 2/3/4)";
-                    } else if (formatted.find("FSR 4") != std::string::npos) {
-                        suffix = " (SDK DirectML - RDNA 3/4)";
-                    } else if (formatted.find("FSR 3") != std::string::npos) {
-                        suffix = " (Temporal)";
-                    }
-                    options.push_back({"Force " + formatted + suffix, formatted, v.id});
-                }
-
-                std::vector<const char*> cLabels;
-                cLabels.reserve(options.size());
-                for (const auto& opt : options) {
-                    cLabels.push_back(opt.label.c_str());
-                }
-
-                int currentVerIdx = 0;
-                std::string cfgLower = g_config.version;
-                std::transform(cfgLower.begin(), cfgLower.end(), cfgLower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (cfgLower != "auto" && cfgLower != "default" && !cfgLower.empty()) {
-                    uint64_t resolvedId = loader::ResolveVersionId(g_device.Get(), g_config.version);
-                    for (size_t i = 1; i < options.size(); ++i) {
-                        if (options[i].id == resolvedId) {
-                            currentVerIdx = static_cast<int>(i);
-                            break;
-                        }
-                    }
-                }
-
-                if (ImGui::Combo("Engine Version", &currentVerIdx, cLabels.data(), static_cast<int>(cLabels.size()))) {
-                    if (currentVerIdx >= 0 && currentVerIdx < static_cast<int>(options.size())) {
-                        g_config.version = options[currentVerIdx].configVal;
-                    } else {
-                        g_config.version = "Auto";
-                    }
-                    game::ApplyConfig(g_config);
+            // Row 4: Custom Scale Slider (only visible when Custom is selected)
+            if (g_config.mode == QualityMode::Custom) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Custom Scale");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (ImGui::SliderFloat("##CustomScale", &g_config.customScale, 0.50f, 1.00f, "%.2fx")) {
+                    game::RecomputeRenderScale();
                     ngx::ResetAllFeatures();
                 }
-
-                bool fsr412Selected = hasDriver412 && currentVerIdx >= 0 &&
-                                      currentVerIdx < static_cast<int>(options.size()) &&
-                                      (currentVerIdx == 0 ||
-                                       options[currentVerIdx].configVal.find("4.1.2") != std::string::npos);
-                if (fsr412Selected) {
-                    ImGui::Spacing();
-                    static const char* kModelLabels[] = {
-                        "Auto (GPU Default)",
-                        "Standard INT8 (RDNA 3/4 Quality)",
-                        "RDNA 2 INT8-2 (Balanced / Faster)",
-                        "Lite INT8 (FSR4L-i8 - Max FPS)"
-                    };
-                    int currentModel = std::clamp(static_cast<int>(g_config.fsr4Model), 0, 3);
-                    if (ImGui::Combo("FSR 4.1.2 Model", &currentModel, kModelLabels, IM_ARRAYSIZE(kModelLabels))) {
-                        g_config.fsr4Model = static_cast<Fsr4Model>(currentModel);
-                        game::ApplyConfig(g_config);
-                        ngx::ResetAllFeatures();
-                    }
-                    ImGui::TextDisabled("Lite is the fastest; Standard has the best quality. Unsupported choices fall back to Auto.");
-                }
-
-                if (hasFsr4) {
-                    ImGui::TextDisabled("Active ML support: AMD FSR 4 (RDNA 2 RX 6000 / RDNA 3 RX 7000 / RDNA 4 RX 9000).");
-                } else {
-                    ImGui::TextDisabled("Note: AMD FSR 4.1.2 requires AMD Adrenalin 26.10.1+ driver on RDNA 2/3/4 GPUs.");
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "ADVANCED RENDERING");
-                if (ImGui::Checkbox("Dynamic Auto Exposure", &g_config.autoExposure)) {
-                    game::ApplyConfig(g_config);
-                    ngx::ResetAllFeatures();
-                }
-                ImGui::TextDisabled("Allows FSR to compute its own exposure luminance buffer dynamically.");
-
-                ImGui::Spacing();
-                if (ImGui::Checkbox("Reflection History Filter Fix", &g_config.reflectionFix)) {
-                    game::ApplyConfig(g_config);
-                }
-                ImGui::TextDisabled("Fixes 2x2 grid jitter artifacts on screen-space water/wet reflections.");
-
-                ImGui::EndTabItem();
             }
 
-            // Tab 3: Anti-Lag 2 & Latency
-            if (ImGui::BeginTabItem("Anti-Lag 2 & Latency")) {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "AMD FIDELITYFX ANTI-LAG 2");
-
-                bool supported = antilag::IsSupported();
-                bool active = antilag::IsActive();
-
-                if (supported) {
-                    if (active) {
-                        ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "Driver Status: Active (amdxc64.dll)");
-                    } else {
-                        ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "Driver Status: Ready (Disabled)");
-                    }
-                } else {
-                    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f), "Driver Status: Unavailable (Requires AMD Radeon GPU)");
+            // Row 5: RCAS Sharpness (Slider + Quick Pills on the same line)
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("RCAS Sharpness");
+            ImGui::TableSetColumnIndex(1);
+            {
+                float sharpVal = g_config.Sharpness();
+                float availW = ImGui::GetContentRegionAvail().x;
+                float quickGroupW = 192.0f;
+                ImGui::SetNextItemWidth(std::max(100.0f, availW - quickGroupW - ImGui::GetStyle().ItemSpacing.x));
+                if (ImGui::SliderFloat("##Sharpness", &sharpVal, 0.0f, 1.0f, "%.2f")) {
+                    g_config.sharpness = sharpVal;
                 }
-
-                ImGui::Spacing();
-                ImGui::Checkbox("Enable Anti-Lag 2", &g_config.antiLag2);
-                ImGui::TextDisabled("Synchronizes CPU input polling with GPU execution to minimize click-to-photon latency.");
-
-                if (active) {
-                    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f),
-                                       "AL2 Driver Sync Wait: %.2f ms  |  Input-to-Present Latency: %.1f ms",
-                                       m.antiLagWaitMs, m.inputToPresentMs);
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "DRIVER FRAME PACING");
-                ImGui::SliderInt("Driver Max FPS", &g_config.antiLagMaxFps, 0, 240, g_config.antiLagMaxFps == 0 ? "Unlimited" : "%d FPS");
-                ImGui::TextDisabled("Driver-level frame rate limiter. Ensures stable frame pacing without queue bloat.");
-
-                ImGui::EndTabItem();
-            }
-
-            // Tab 4: Diagnostics & Telemetry Profiler
-            if (ImGui::BeginTabItem("Diagnostics & Profiler")) {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "LATENCY & PERFORMANCE PROFILER");
-
-                ImGui::BeginChild("ProfilerBox", ImVec2(0, 150), true);
-                {
-                    ImGui::Text("Upscaler Pass (%s):", ActiveFsrVersion().c_str());
-                    ImGui::SameLine(280);
-                    ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "%.2f ms (GPU)  /  %.2f ms (CPU)", m.upscaleGpuMs, m.upscaleCpuMs);
-
-                    ImGui::Text("Anti-Lag 2 CPU Pacing Delay:");
-                    ImGui::SameLine(280);
-                    if (antilag::IsActive()) {
-                        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f), "%.2f ms (amdxc64 sync)", m.antiLagWaitMs);
-                    } else {
-                        ImGui::TextDisabled("Disabled");
-                    }
-
-                    ImGui::Text("GPU Render Queue Latency:");
-                    ImGui::SameLine(280);
-                    ImGui::Text("%.2f ms", m.gpuQueueLatencyMs);
-
-                    ImGui::Text("PC Latency (Input-to-Present):");
-                    ImGui::SameLine(280);
-                    ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%.1f ms", m.inputToPresentMs);
-
-                    ImGui::Separator();
-
-                    size_t histOffset = 0;
-                    const auto& hist = telemetry::GetFrameTimeHistory(histOffset);
-                    char overlayLabel[64];
-                    std::snprintf(overlayLabel, sizeof(overlayLabel), "Presented Frame Time: %.2f ms (%.1f FPS)",
-                                  m.presentedFrameTimeMs, m.presentedFps);
-                    ImGui::PlotLines("##FrameTimePlot", hist.data(), static_cast<int>(hist.size()),
-                                     static_cast<int>(histOffset), overlayLabel, 0.0f, 33.3f, ImVec2(-1, 48));
-                }
-                ImGui::EndChild();
-
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.92f, 0.18f, 0.24f, 1.0f), "OVERLAY & VISUAL COMPARISON");
-                ImGui::Checkbox("Show Corner Watermark (OSD)", &g_config.showOsd);
                 ImGui::SameLine();
-                ImGui::Checkbox("Show FPS Counter", &g_config.showFps);
+                if (SegmentedButton("Off", std::abs(sharpVal - 0.0f) < 0.02f, 42.0f)) g_config.sharpness = 0.0f;
                 ImGui::SameLine();
-                ImGui::Checkbox("Show Latency Breakdown", &g_config.showLatencyOsd);
-
-                if (ImGui::Checkbox("Bypass FSR (Show Vanilla Capcom TAA)", &g_config.bypass)) {
-                    game::ApplyConfig(g_config);
-                }
-
-                ImGui::Spacing();
-                ImGui::TextDisabled("Jitter Telemetry: %s", game::JitterStats().c_str());
-
-                ImGui::EndTabItem();
+                if (SegmentedButton("0.33", std::abs(sharpVal - 0.33f) < 0.02f, 44.0f)) g_config.sharpness = 0.33f;
+                ImGui::SameLine();
+                if (SegmentedButton("0.66", std::abs(sharpVal - 0.66f) < 0.02f, 44.0f)) g_config.sharpness = 0.66f;
+                ImGui::SameLine();
+                if (SegmentedButton("1.0", std::abs(sharpVal - 1.0f) < 0.02f, 40.0f)) g_config.sharpness = 1.0f;
             }
 
-            ImGui::EndTabBar();
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+
+        // 3. Section: Anti-Lag 2 & Frame Pacing
+        bool al2Supported = antilag::IsSupported();
+        bool al2Active = antilag::IsActive();
+        const char* al2Badge = !al2Supported ? "Unavailable (Radeon Only)"
+                                             : (al2Active ? "Driver Active (amdxc64.dll)" : "Ready (Disabled)");
+        ImVec4 al2Color = !al2Supported ? ImVec4(0.95f, 0.65f, 0.20f, 1.0f)
+                                        : (al2Active ? ImVec4(0.25f, 0.90f, 0.45f, 1.0f) : ImVec4(0.60f, 0.62f, 0.68f, 1.0f));
+
+        DrawSectionHeader("RADEON ANTI-LAG 2 & FRAME PACING", al2Badge, al2Color);
+
+        if (ImGui::BeginTable("Al2ControlsTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+            ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch);
+
+            // Row 1: Anti-Lag 2 Toggle
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Anti-Lag 2");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Checkbox("Sync CPU Input Polling with GPU Execution", &g_config.antiLag2);
+            if (al2Active) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.50f, 1.0f), "(Wait: %.2f ms)", m.antiLagWaitMs);
+            }
+
+            // Row 2: Driver Max FPS Slider + Quick Pills
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Max FPS Limit");
+            ImGui::TableSetColumnIndex(1);
+            {
+                int maxSliderFps = std::max(360, g_config.antiLagMaxFps);
+                float availW = ImGui::GetContentRegionAvail().x;
+                float quickGroupW = 216.0f;
+                ImGui::SetNextItemWidth(std::max(100.0f, availW - quickGroupW - ImGui::GetStyle().ItemSpacing.x));
+                ImGui::SliderInt("##DriverMaxFps", &g_config.antiLagMaxFps, 0, maxSliderFps,
+                                 g_config.antiLagMaxFps == 0 ? "Unlimited" : "%d FPS");
+                ImGui::SameLine();
+                if (SegmentedButton("Off", g_config.antiLagMaxFps == 0, 38.0f)) g_config.antiLagMaxFps = 0;
+                ImGui::SameLine();
+                if (SegmentedButton("60", g_config.antiLagMaxFps == 60, 34.0f)) g_config.antiLagMaxFps = 60;
+                ImGui::SameLine();
+                if (SegmentedButton("120", g_config.antiLagMaxFps == 120, 38.0f)) g_config.antiLagMaxFps = 120;
+                ImGui::SameLine();
+                if (SegmentedButton("144", g_config.antiLagMaxFps == 144, 38.0f)) g_config.antiLagMaxFps = 144;
+                ImGui::SameLine();
+                if (SegmentedButton("240", g_config.antiLagMaxFps == 240, 38.0f)) g_config.antiLagMaxFps = 240;
+            }
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+
+        // 4. Section: On-Screen Display (OSD) & Telemetry
+        DrawSectionHeader("OVERLAY & TELEMETRY PROFILER");
+
+        if (ImGui::BeginTable("OsdTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+            ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Corner OSD");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Checkbox("Show Badge", &g_config.showOsd);
+            ImGui::SameLine(0.0f, 18.0f);
+            ImGui::Checkbox("FPS Counter", &g_config.showFps);
+            ImGui::SameLine(0.0f, 18.0f);
+            ImGui::Checkbox("Latency Breakdown", &g_config.showLatencyOsd);
+
+            ImGui::EndTable();
+        }
+
+        if (ImGui::CollapsingHeader("Frame-Time & Latency Breakdown")) {
+            ImGui::BeginChild("ProfilerBox", ImVec2(0, 128), true, ImGuiWindowFlags_NoScrollbar);
+            {
+                if (ImGui::BeginTable("ProfilerMetrics", 2, ImGuiTableFlags_SizingStretchProp)) {
+                    ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 210.0f);
+
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("Upscaler Pass (%s)", ActiveFsrVersion().c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "%.2f ms GPU  |  %.2f ms CPU", m.upscaleGpuMs, m.upscaleCpuMs);
+
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("Anti-Lag 2 Pacing Wait / GPU Queue");
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.2f ms Wait  |  %.2f ms Queue", m.antiLagWaitMs, m.gpuQueueLatencyMs);
+
+                    ImGui::EndTable();
+                }
+
+                size_t histOffset = 0;
+                const auto& hist = telemetry::GetFrameTimeHistory(histOffset);
+                char overlayLabel[64];
+                std::snprintf(overlayLabel, sizeof(overlayLabel), "Frame Time: %.2f ms (%.1f FPS)",
+                              m.presentedFrameTimeMs, m.presentedFps);
+                ImGui::PlotLines("##FrameTimePlot", hist.data(), static_cast<int>(hist.size()),
+                                 static_cast<int>(histOffset), overlayLabel, 0.0f, 33.3f, ImVec2(-1, 52));
+            }
+            ImGui::EndChild();
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Footer Actions
-        if (ImGui::Button("Save to MHW-FSR.ini", ImVec2(180, 32))) {
+        // 5. Footer Actions
+        if (ImGui::Button("Save to MHW-FSR.ini", ImVec2(175, 30))) {
             SaveConfig(g_config);
-            g_saveFeedback = "Settings saved to MHW-FSR.ini!";
+            g_saveFeedback = "Saved to MHW-FSR.ini!";
             g_saveFeedbackTime = std::chrono::steady_clock::now();
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Close Menu [F10]", ImVec2(140, 32))) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.26f, 0.31f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.32f, 0.32f, 0.38f, 1.0f));
+        if (ImGui::Button("Close [F10]", ImVec2(115, 30))) {
             g_showMenu = false;
         }
+        ImGui::PopStyleColor(3);
 
         if (!g_saveFeedback.empty()) {
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - g_saveFeedbackTime).count() < 3) {
                 ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();
                 ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "%s", g_saveFeedback.c_str());
             } else {
                 g_saveFeedback.clear();
@@ -979,10 +1032,6 @@ HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain3* swapChain, UINT buf
 
 }  // namespace
 
-bool IsInstalled() {
-    return g_hooked.load();
-}
-
 void TryInstall() {
     if (g_hooked.load()) return;
     auto dx12 = game::IsDx12();
@@ -1023,10 +1072,6 @@ void TryInstall() {
 
     g_hooked.store(true);
     LOGI("MHW-FSR: DirectX 12 SwapChain hooked successfully for in-game overlay");
-}
-
-void OnPresent(IDXGISwapChain3* /*swapChain*/) {
-    // Handled directly inside PresentWithOverlay
 }
 
 void OnPreResize() {

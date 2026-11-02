@@ -9,7 +9,6 @@
 
 #include <ffx_api.hpp>
 #include <ffx_upscale.hpp>
-#include <ffx_framegeneration.hpp>
 #include <dx12/ffx_api_dx12.hpp>
 
 namespace fs = std::filesystem;
@@ -353,20 +352,6 @@ std::string DescribeActiveFsr4Model(const void* ffxContext) {
         }
     }
     return {};
-}
-
-bool HasFrameGenSupport(ID3D12Device* device) {
-    if (!device) return false;
-    EnsureLoaded();
-    EnsureDriverProviderLoaded();
-    uint64_t count = 0;
-    ffx::QueryDescGetVersions q{};
-    q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
-    q.device = device;
-    q.outputCount = &count;
-
-    ffx::ReturnCode rc = ffx::Query(q);
-    return (static_cast<uint32_t>(rc) == FFX_API_RETURN_OK && count > 0);
 }
 
 uint64_t ResolveVersionId(ID3D12Device* device, const std::string& versionStr) {

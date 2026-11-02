@@ -2,23 +2,21 @@
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
-#include <psapi.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "antilag.h"
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_context.h"
-#include "framegen.h"
 #include "fsr_loader.h"
 #include "game.h"
 #include "log.h"
@@ -26,8 +24,8 @@
 #include "ngx_compat.h"
 #include "ngx_params.h"
 #include "overlay/overlay.h"
-#include "probe.h"
 #include "telemetry.h"
+#include "tuning.h"
 
 namespace mhwfsr::ngx {
 
@@ -51,9 +49,6 @@ struct Table {
     void* evaluate;
     void* release;
 };
-
-using PfnShutdown = NVSDK_NGX_Result(NVSDK_CONV*)();
-using PfnRelease = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
 
 struct ApiState {
     Table* table = nullptr;  // live table in the game
@@ -80,23 +75,7 @@ struct Feature {
     uint64_t resets = 0;
 
     NVSDK_NGX_Handle* Handle() { return reinterpret_cast<NVSDK_NGX_Handle*>(&handle); }
-    const char* Name() const { return id == NVSDK_NGX_Feature_SuperSampling ? "FSR(TAA)" : "FSR(DLISP)"; }
-};
-
-struct UpscaleInputs {
-    bool valid = false;
-    d3d::Mirror12 motion12, depth12;
-    ID3D12Resource* motion = nullptr;
-    ID3D12Resource* depth = nullptr;
-    unsigned x = 0, y = 0, width = 0, height = 0;
-    float jitterX = 0, jitterY = 0;
-    float cameraNear = 0.1f, cameraFar = 10000.0f, cameraFov = 0.785398f;
-    float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
-    float cameraUp[3] = {0.0f, 1.0f, 0.0f};
-    float cameraRight[3] = {1.0f, 0.0f, 0.0f};
-    float cameraForward[3] = {0.0f, 0.0f, 1.0f};
-    int reset = 0;
-    uint64_t frame = 0;
+    const char* Name() const { return id == NVSDK_NGX_Feature_SuperSampling ? "FSR(TAA)" : "FSR(SceneResolve)"; }
 };
 
 std::recursive_mutex g_mutex;
@@ -108,12 +87,8 @@ ShimParameters g_params;
 NVSDK_NGX_Parameter* g_legacyParams = nullptr;
 bool g_contextCreated = false;
 bool g_fallbackChecked = false;
-
-UpscaleInputs g_upscale;
-std::wstring g_dataDir;
-std::wstring g_gameDir;
-bool g_probeRequested = false;
-bool g_adoptedLate = false;
+unsigned g_displayWidth = 0;
+unsigned g_displayHeight = 0;
 
 LARGE_INTEGER g_qpcFreq{};
 LARGE_INTEGER g_lastDispatchQpc{};
@@ -202,6 +177,10 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* p) {
     std::lock_guard lock(g_mutex);
     unsigned w = GetUI(p, NVSDK_NGX_Parameter_Width);
     unsigned h = GetUI(p, NVSDK_NGX_Parameter_Height);
+    if (w && h) {
+        g_displayWidth = w;
+        g_displayHeight = h;
+    }
     float scale = g_config.RenderScale();
     unsigned rw = w, rh = h;
     if (scale < 0.999f) {
@@ -216,6 +195,15 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* p) {
     p->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, rh);
     p->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     p->Set("DLSSMode", 1);
+
+    for (auto& f : g_features) {
+        if (f->id == NVSDK_NGX_Feature_SuperSampling) {
+            f->expectedWidth = rw;
+            f->expectedHeight = rh;
+            f->staleFrames = 0;
+            f->resetNext = true;
+        }
+    }
 
     static unsigned lastW = 0, lastH = 0, lastRw = 0;
     if (w != lastW || h != lastH || rw != lastRw) {
@@ -241,31 +229,36 @@ float GetFrameDeltaTimeMs() {
     return static_cast<float>(std::clamp(elapsed, 0.1, 100.0));
 }
 
-uint32_t BuildFsrFlags(bool hdr) {
+uint32_t BuildFsrFlags(bool hdr, bool infiniteDepth = false) {
     uint32_t flags = 0;
-    if (g_config.hdr >= 0) hdr = (g_config.hdr != 0);
     if (hdr) flags |= FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
-    if (g_config.depthInverted) flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
-    if (g_config.depthInfinite) flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
-    if (g_config.autoExposure) flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
-    if (g_config.mvJittered) flags |= FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+    if (tuning::kDepthInverted) flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
+    if (infiniteDepth) flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
+    // MHW provides no external 1x1 exposure buffer. FSR 3/4 requires an exposure texture
+    // when auto-exposure is disabled; without it, FSR dispatch fails (code 0x6) and freezes.
+    // Auto-exposure is therefore always enabled.
+    flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
     if (g_config.logLevel == LogLevel::Debug) flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
     return flags;
 }
 
 void LogEvaluation(Feature& f, bool success, unsigned renderW, unsigned renderH,
-                   unsigned outW, unsigned outH, float jx, float jy, uint64_t frame, int reset) {
+                   unsigned outW, unsigned outH, float jx, float jy, uint64_t frame, int reset, const char* resetReason = nullptr) {
     uint64_t n = f.evaluations++;
-    if (reset) ++f.resets;
+    if (reset) {
+        ++f.resets;
+        if (n > 0) {
+            LOGI("{} temporal history RESET at frame {} (eval #{})! Reason: {}",
+                 f.Name(), frame, n, resetReason ? resetReason : "unknown");
+        }
+    }
     if (n < kDetailedEvaluations || !success) {
         LOGD("{} evaluate #{}: status {}; render {}x{}, output {}x{}; jitter {:.4f},{:.4f} (frame {}); reset {}",
              f.Name(), n, success ? "OK" : "FAILED", renderW, renderH, outW, outH, jx, jy, frame, reset);
-    } else if (g_config.verboseFrames && n < 40) {
-        LOGD("{} evaluate #{}: jitter {:.4f},{:.4f} (frame {}) reset {}", f.Name(), n, jx, jy, frame, reset);
     } else if ((n & (n - 1)) == 0) {
         Log((n == 512 || (n % 4096) == 0) ? LogLevel::Info : LogLevel::Debug,
-            "{} evaluate #{} ok ({} resets since #{}; {})",
-            f.Name(), n, f.resets, n / 2, game::JitterStats());
+            "{} evaluate #{} ok ({} resets since #{})",
+            f.Name(), n, f.resets, n / 2);
         f.resets = 0;
     }
 }
@@ -293,87 +286,84 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     d3d::TextureInfo outputInfo = Info(output);
     Rect rect = RectFrom(p, colorInfo);
 
+    static std::atomic<uint64_t> s_taaProbes{0};
+    if (s_taaProbes.fetch_add(1) < 3) {
+        d3d::TextureInfo motionInfo = Info(motion);
+        d3d::TextureInfo depthInfo = Info(depth);
+        LOGD("TAA Probe #{} [sceneResolveActive={}]: color={}x{} fmt={}, output={}x{} fmt={}, motion={}x{} fmt={}, depth={}x{} fmt={}, rect=({},{} {}x{}), pWidth={}, pHeight={}",
+             s_taaProbes.load(), game::SceneResolveActive(),
+             colorInfo.width, colorInfo.height, colorInfo.format,
+             outputInfo.width, outputInfo.height, outputInfo.format,
+             motionInfo.width, motionInfo.height, motionInfo.format,
+             depthInfo.width, depthInfo.height, depthInfo.format,
+             rect.x, rect.y, rect.width, rect.height,
+             GetUI(p, NVSDK_NGX_Parameter_Width), GetUI(p, NVSDK_NGX_Parameter_Height));
+    }
+
     auto jitter = game::JitterForOutput(output);
     float scale = game::RenderScale();
-    float jx = (jitter ? jitter->x : 0.0f) * g_config.jitterScaleX * scale;
-    float jy = (jitter ? jitter->y : 0.0f) * g_config.jitterScaleY * scale;
+    float jx = (jitter ? jitter->x : 0.0f) * tuning::kJitterScaleX * scale;
+    float jy = (jitter ? jitter->y : 0.0f) * tuning::kJitterScaleY * scale;
     // Ignore transient NVSDK_NGX_Parameter_Reset pulses from the engine's legacy TAA filter during
     // steady-state combat (radial blur / hit-stop blend=0 pulses). Only reset on first evaluation,
     // explicit config/preset reload (f.resetNext), or verified camera position teleports (jitter->cut).
-    int reset = (f.evaluations == 0) || (jitter && jitter->cut && g_config.cutReset);
-    if (f.resetNext) {
+    const char* resetReason = nullptr;
+    int reset = 0;
+    if (f.evaluations == 0) {
+        reset = 1;
+        resetReason = "initial evaluation";
+    } else if (f.resetNext) {
         f.resetNext = false;
         reset = 1;
+        resetReason = "settings reload / preset switch";
+    } else if (jitter && jitter->cut) {
+        reset = 1;
+        resetReason = "camera cut teleport";
     }
     uint64_t frame = jitter ? jitter->frame : 0;
-
-    probe::Poll();
-    if (g_probeRequested && !game::DlispActive()) {
-        g_probeRequested = false;
-        probe::Schedule(cl, color, motion, depth, output);
-    }
-    probe::RecordFrame(cl, color, motion, depth, jitter ? jitter->x : 0.0f, jitter ? jitter->y : 0.0f);
-
-    if (game::DlispActive()) {
-        // Upscaling mode: pass jittered color on to output texture and mirror motion/depth
-        if (rect.x + rect.width > outputInfo.width || rect.y + rect.height > outputInfo.height) {
-            g_upscale.valid = false;
-            return NVSDK_NGX_Result_Success;
-        }
-        d3d::CopyRect12(cl, output, color, rect.x, rect.y, rect.width, rect.height);
-        g_upscale.motion = g_upscale.motion12.Update(cl, motion);
-        g_upscale.depth = g_upscale.depth12.Update(cl, depth);
-        g_upscale.valid = (g_upscale.motion && g_upscale.depth);
-        g_upscale.x = rect.x;
-        g_upscale.y = rect.y;
-        g_upscale.width = rect.width;
-        g_upscale.height = rect.height;
-        g_upscale.jitterX = jx;
-        g_upscale.jitterY = jy;
-        g_upscale.reset = reset;
-        g_upscale.frame = frame;
-        if (jitter) {
-            g_upscale.cameraNear = jitter->cameraNear;
-            g_upscale.cameraFar = jitter->cameraFar;
-            g_upscale.cameraFov = jitter->fovY;
-            std::memcpy(g_upscale.cameraPosition, jitter->cameraPosition, sizeof(g_upscale.cameraPosition));
-            std::memcpy(g_upscale.cameraUp, jitter->cameraUp, sizeof(g_upscale.cameraUp));
-            std::memcpy(g_upscale.cameraRight, jitter->cameraRight, sizeof(g_upscale.cameraRight));
-            std::memcpy(g_upscale.cameraForward, jitter->cameraForward, sizeof(g_upscale.cameraForward));
-        }
-
-        if (f.evaluations++ < kDetailedEvaluations) {
-            LOGD("FSR evaluate: upscaling mode, render {}x{} passed on for DLISP", rect.width, rect.height);
-        }
-        return NVSDK_NGX_Result_Success;
-    }
-
-    // NativeAA (DLAA equivalent) mode: FSR runs directly at TAA position
-    g_upscale.valid = false;
-    g_upscale.motion = g_upscale.depth = nullptr;
-    g_upscale.motion12.Reset();
-    g_upscale.depth12.Reset();
-
-    if (g_config.bypass) return NVSDK_NGX_Result_Success;
-    if (StaleFrame(f, rect.width, rect.height)) return NVSDK_NGX_Result_Success;
 
     ID3D12Device* device = DeviceOf(cl);
     if (!device) return NVSDK_NGX_Result_Fail;
 
     bool hdr = (GetI(p, "Hint.HDR", 1) != 0) || d3d::IsFloatFormat(colorInfo.format);
-    uint32_t flags = BuildFsrFlags(hdr);
+    bool infinite = jitter ? jitter->infiniteDepth : false;
+    uint32_t flags = BuildFsrFlags(hdr, infinite);
     uint64_t versionId = loader::ResolveVersionId(device, g_config.version);
 
+    if (StaleFrame(f, rect.width, rect.height)) return NVSDK_NGX_Result_Success;
+
+    unsigned inW = rect.width;
+    unsigned inH = rect.height;
+    unsigned upW = outputInfo.width;
+    unsigned upH = outputInfo.height;
+    if (game::SceneResolveActive() || scale < 0.999f) {
+        if (g_displayWidth > inW && g_displayHeight > inH) {
+            upW = g_displayWidth;
+            upH = g_displayHeight;
+        } else if (scale < 0.999f) {
+            upW = static_cast<unsigned>(std::lround(inW / scale));
+            upH = static_cast<unsigned>(std::lround(inH / scale));
+        }
+    }
+    bool upscalingAtTaa = (upW > outputInfo.width || upH > outputInfo.height);
+
     FsrContext::Settings s{};
-    s.renderW = rect.width;
-    s.renderH = rect.height;
-    s.upscaleW = outputInfo.width;
-    s.upscaleH = outputInfo.height;
+    s.renderW = inW;
+    s.renderH = inH;
+    s.upscaleW = upW;
+    s.upscaleH = upH;
     s.flags = flags;
     s.versionId = versionId;
     s.modelOverride = static_cast<uint32_t>(g_config.fsr4Model);
 
     if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
+
+    ID3D12Resource* fsrOutput = output;
+    if (upscalingAtTaa) {
+        fsrOutput = d3d::BeginTaaUpscale12(cl, device, upW, upH, outputInfo.width, outputInfo.height,
+                                           static_cast<DXGI_FORMAT>(outputInfo.format));
+        if (!fsrOutput) return NVSDK_NGX_Result_Fail;
+    }
 
     game::NoteDlssEvaluated();
 
@@ -382,18 +372,18 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     dp.color = color;
     dp.depth = depth;
     dp.motion = motion;
-    dp.output = output;
+    dp.output = fsrOutput;
     dp.jitterX = jx;
     dp.jitterY = jy;
-    dp.motionScaleX = g_config.mvScaleX;
-    dp.motionScaleY = g_config.mvScaleY;
-    dp.renderW = rect.width;
-    dp.renderH = rect.height;
-    dp.upscaleW = outputInfo.width;
-    dp.upscaleH = outputInfo.height;
+    dp.motionScaleX = tuning::kMotionScaleX;
+    dp.motionScaleY = tuning::kMotionScaleY;
+    dp.renderW = inW;
+    dp.renderH = inH;
+    dp.upscaleW = upW;
+    dp.upscaleH = upH;
     dp.sharpness = g_config.Sharpness();
     dp.frameTimeDeltaMs = GetFrameDeltaTimeMs();
-    dp.preExposure = g_config.preExposure;
+    dp.preExposure = tuning::kPreExposure;
     dp.cameraNear = jitter ? jitter->cameraNear : 0.1f;
     dp.cameraFar = jitter ? jitter->cameraFar : 1000.0f;
     dp.cameraFovAngleVertical = jitter ? jitter->fovY : 0.785398f;
@@ -402,147 +392,46 @@ NVSDK_NGX_Result EvaluateAtTaa(Feature& f, void* cmd, const NVSDK_NGX_Parameter*
     telemetry::BeginUpscalePass(cl);
     bool ok = f.fsr.Dispatch(dp);
     telemetry::EndUpscalePass(cl);
-    if (ok) {
-        framegen::FrameData fd{};
-        fd.depth = depth;
-        fd.motion = motion;
-        fd.jitterX = jx;
-        fd.jitterY = jy;
-        fd.mvScaleX = g_config.mvScaleX;
-        fd.mvScaleY = g_config.mvScaleY;
-        fd.renderW = rect.width;
-        fd.renderH = rect.height;
-        fd.displayW = outputInfo.width;
-        fd.displayH = outputInfo.height;
-        fd.cameraNear = dp.cameraNear;
-        fd.cameraFar = dp.cameraFar;
-        fd.fovY = dp.cameraFovAngleVertical;
-        if (jitter) {
-            std::memcpy(fd.cameraPosition, jitter->cameraPosition, sizeof(fd.cameraPosition));
-            std::memcpy(fd.cameraUp, jitter->cameraUp, sizeof(fd.cameraUp));
-            std::memcpy(fd.cameraRight, jitter->cameraRight, sizeof(fd.cameraRight));
-            std::memcpy(fd.cameraForward, jitter->cameraForward, sizeof(fd.cameraForward));
-        }
-        fd.deltaMs = dp.frameTimeDeltaMs;
-        fd.reset = dp.reset;
-        fd.frameId = frame;
-        framegen::RecordFrameData(cl, fd);
+    if (upscalingAtTaa) {
+        d3d::FinishTaaUpscale12(cl, device, output, upW, upH, outputInfo.width, outputInfo.height);
+    } else if (ok) {
+        // D3D12 UAV Cache Coherency Barrier: Ensure all FSR compute writes to output are flushed
+        // before the engine's subsequent post-process or presentation passes sample output.
+        D3D12_RESOURCE_BARRIER uavBarrier{};
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        uavBarrier.UAV.pResource = output;
+        cl->ResourceBarrier(1, &uavBarrier);
     }
-    LogEvaluation(f, ok, rect.width, rect.height, outputInfo.width, outputInfo.height, jx, jy, frame, reset);
+    LogEvaluation(f, ok, inW, inH, upW, upH, jx, jy, frame, reset, resetReason);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }
 
-NVSDK_NGX_Result EvaluateAtDlisp(Feature& f, void* cmd, const NVSDK_NGX_Parameter* p) {
-    if (f.api != Api::D3D12) {
-        return NVSDK_NGX_Result_FAIL_PlatformError;
-    }
-
+NVSDK_NGX_Result EvaluateAtSceneResolve(Feature& f, void* cmd, const NVSDK_NGX_Parameter* p) {
+    if (f.api != Api::D3D12) return NVSDK_NGX_Result_FAIL_PlatformError;
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmd);
     ID3D12Resource* color = GetResource12(p, NVSDK_NGX_Parameter_Color);
     ID3D12Resource* output = GetResource12(p, NVSDK_NGX_Parameter_Output);
-
-    if (!color || !output) return NVSDK_NGX_Result_FAIL_InvalidParameter;
-    if (!g_upscale.valid) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            LOGD("DLISP called without valid TAA inputs (menu or transition); frame left untouched");
-        }
-        return NVSDK_NGX_Result_Fail;
-    }
-    g_upscale.valid = false;
-
-    d3d::TextureInfo colorInfo = Info(color);
-    d3d::TextureInfo outputInfo = Info(output);
-    Rect rect = RectFrom(p, colorInfo);
-
-    unsigned inW = std::min(rect.width, g_upscale.width);
-    unsigned inH = std::min(rect.height, g_upscale.height);
-    float jx = g_upscale.jitterX;
-    float jy = g_upscale.jitterY;
-    int reset = (f.evaluations == 0) || g_upscale.reset;
-    if (f.resetNext) {
-        f.resetNext = false;
-        reset = 1;
-    }
-
-    if (StaleFrame(f, inW, inH)) return NVSDK_NGX_Result_Success;
-
-    if (g_probeRequested) {
-        g_probeRequested = false;
-        probe::Schedule(cl, color, nullptr, nullptr, output);
-    }
+    if (!cl || !color || !output) return NVSDK_NGX_Result_FAIL_InvalidParameter;
 
     ID3D12Device* device = DeviceOf(cl);
     if (!device) return NVSDK_NGX_Result_Fail;
 
-    bool hdr = d3d::IsFloatFormat(colorInfo.format);
-    uint32_t flags = BuildFsrFlags(hdr);
-    uint64_t versionId = loader::ResolveVersionId(device, g_config.version);
-
-    FsrContext::Settings s{};
-    s.renderW = inW;
-    s.renderH = inH;
-    s.upscaleW = outputInfo.width;
-    s.upscaleH = outputInfo.height;
-    s.flags = flags;
-    s.versionId = versionId;
-    s.modelOverride = static_cast<uint32_t>(g_config.fsr4Model);
-
-    if (!f.fsr.Ensure(device, s)) return NVSDK_NGX_Result_Fail;
-
-    game::NoteDlssEvaluated();
-
-    FsrContext::DispatchParams dp{};
-    dp.commandList = cl;
-    dp.color = color;
-    dp.depth = g_upscale.depth;
-    dp.motion = g_upscale.motion;
-    dp.output = output;
-    dp.jitterX = jx;
-    dp.jitterY = jy;
-    dp.motionScaleX = g_config.mvScaleX;
-    dp.motionScaleY = g_config.mvScaleY;
-    dp.renderW = inW;
-    dp.renderH = inH;
-    dp.upscaleW = outputInfo.width;
-    dp.upscaleH = outputInfo.height;
-    dp.sharpness = g_config.Sharpness();
-    dp.frameTimeDeltaMs = GetFrameDeltaTimeMs();
-    dp.preExposure = g_config.preExposure;
-    dp.cameraNear = g_upscale.cameraNear;
-    dp.cameraFar = g_upscale.cameraFar;
-    dp.cameraFovAngleVertical = g_upscale.cameraFov;
-    dp.reset = (reset != 0);
-
-    telemetry::BeginUpscalePass(cl);
-    bool ok = f.fsr.Dispatch(dp);
-    telemetry::EndUpscalePass(cl);
-    if (ok) {
-        framegen::FrameData fd{};
-        fd.depth = g_upscale.depth;
-        fd.motion = g_upscale.motion;
-        fd.jitterX = jx;
-        fd.jitterY = jy;
-        fd.mvScaleX = g_config.mvScaleX;
-        fd.mvScaleY = g_config.mvScaleY;
-        fd.renderW = inW;
-        fd.renderH = inH;
-        fd.displayW = outputInfo.width;
-        fd.displayH = outputInfo.height;
-        fd.cameraNear = dp.cameraNear;
-        fd.cameraFar = dp.cameraFar;
-        fd.fovY = dp.cameraFovAngleVertical;
-        std::memcpy(fd.cameraPosition, g_upscale.cameraPosition, sizeof(fd.cameraPosition));
-        std::memcpy(fd.cameraUp, g_upscale.cameraUp, sizeof(fd.cameraUp));
-        std::memcpy(fd.cameraRight, g_upscale.cameraRight, sizeof(fd.cameraRight));
-        std::memcpy(fd.cameraForward, g_upscale.cameraForward, sizeof(fd.cameraForward));
-        fd.deltaMs = dp.frameTimeDeltaMs;
-        fd.reset = dp.reset;
-        fd.frameId = g_upscale.frame;
-        framegen::RecordFrameData(cl, fd);
+    d3d::TextureInfo colorInfo = Info(color);
+    d3d::TextureInfo outputInfo = Info(output);
+    Rect rect = RectFrom(p, colorInfo);
+    if (outputInfo.width && outputInfo.height) {
+        g_displayWidth = outputInfo.width;
+        g_displayHeight = outputInfo.height;
     }
-    LogEvaluation(f, ok, inW, inH, outputInfo.width, outputInfo.height, jx, jy, g_upscale.frame, reset);
+
+    // All FSR super-resolution has already been executed in EvaluateAtTaa (uTemporalAAFilter2::Draw)
+    // on clean Linear HDR + Depth + Motion + Halton Jitter. Here at the end of the Scene Pass, we
+    // transfer the engine's uToneMapFilter exposure/filmic curve/3D LUT onto the full-resolution
+    // TAA-upscaled image and write it into the full-resolution pre-HUD scene output target.
+    bool ok = d3d::ResolveTaaTonemap12(cl, device, color, output,
+                                       rect.width, rect.height,
+                                       outputInfo.width, outputInfo.height);
     return ok ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }
 
@@ -554,11 +443,9 @@ NVSDK_NGX_Result ShimShutdown(Api api) {
             f->fsr.Shutdown();
         }
     }
-    g_upscale.valid = false;
-    g_upscale.motion = g_upscale.depth = nullptr;
+
     if (api == Api::D3D12) {
-        g_upscale.motion12.Reset();
-        g_upscale.depth12.Reset();
+        d3d::ResetTaaUpscale12();
         d3d::RetireFlushFeatures();
     }
     return NVSDK_NGX_Result_Success;
@@ -597,7 +484,7 @@ NVSDK_NGX_Result ShimEvaluate(Api api, void* cmd, const NVSDK_NGX_Handle* handle
         }
         return NVSDK_NGX_Result_FAIL_FeatureNotFound;
     }
-    return f->id == NVSDK_NGX_Feature_SuperSampling ? EvaluateAtTaa(*f, cmd, params) : EvaluateAtDlisp(*f, cmd, params);
+    return f->id == NVSDK_NGX_Feature_SuperSampling ? EvaluateAtTaa(*f, cmd, params) : EvaluateAtSceneResolve(*f, cmd, params);
 }
 
 NVSDK_NGX_Result ShimRelease(Api /*api*/, NVSDK_NGX_Handle* handle) {
@@ -812,8 +699,8 @@ bool NeedsAdopt() {
     return !g_contextCreated && !g_fallbackChecked && game::Device() != nullptr;
 }
 
-bool NeedsDlispAttach() {
-    if (!game::DlispActive()) return false;
+bool NeedsSceneResolveAttach() {
+    if (!game::SceneResolveActive()) return false;
     game::DlssContext* ctx = game::Context();
     return ctx && !ctx->dlispHandle;
 }
@@ -835,17 +722,17 @@ void OnFrameStart() {
 
 void OnFrame() {
     game::ForceEnableDlssSupport();
-    if (NeedsPatch(g_api[0]) || NeedsPatch(g_api[1]) || NeedsAdopt() || NeedsDlispAttach()) {
+    if (NeedsPatch(g_api[0]) || NeedsPatch(g_api[1]) || NeedsAdopt() || NeedsSceneResolveAttach()) {
         std::lock_guard lock(g_mutex);
         PatchTable(g_api[0], Api::D3D11, false);
         PatchTable(g_api[1], Api::D3D12, false);
         AdoptContext(true);
-        if (game::DlispActive()) {
+        if (game::SceneResolveActive()) {
             game::DlssContext* ctx = game::Context();
             if (ctx && !ctx->dlispHandle) {
                 Api api = game::IsDx12().value_or(true) ? Api::D3D12 : Api::D3D11;
                 ctx->dlispHandle = AddFeature(api, NVSDK_NGX_Feature_ImageSignalProcessing, nullptr)->Handle();
-                LOGD("Attached DLISP feature for upscaling mode");
+                LOGD("Attached SceneResolve feature for upscaling mode");
             }
         }
     }
@@ -882,31 +769,22 @@ void OnUpdate() {
 
 void ReloadSettings(bool& recompute) {
     if (ReloadConfigIfChanged()) {
-        game::ApplyConfig(g_config);
         LogSetLevel(g_config.logLevel);
-        LOGI("MHW-FSR ini reloaded: mode {}, sharpness {:.2f}, autoExposure {}, depthInverted {}, MV scale {},{}, jitter scale {},{}, bypass {}",
-             QualityModeName(g_config.mode), g_config.Sharpness(), g_config.autoExposure,
-             g_config.depthInverted, g_config.mvScaleX, g_config.mvScaleY,
-             g_config.jitterScaleX, g_config.jitterScaleY, g_config.bypass);
+        LOGI("MHW-FSR ini reloaded: mode {} (scale {:.3f}), sharpness {:.2f}, version {}, model {}, antiLag2 {}",
+             QualityModeName(g_config.mode), g_config.RenderScale(), g_config.Sharpness(),
+             g_config.version, Fsr4ModelName(g_config.fsr4Model), g_config.antiLag2);
 
         for (auto& f : g_features) {
             f->evaluations = 0;
             f->resetNext = true;
-        }
-        g_probeRequested = g_config.debugProbe;
-        if (g_config.debugDumpFrames > 0) {
-            probe::RequestFrameDump(g_dataDir.c_str(), g_config.debugDumpFrames,
-                                    static_cast<unsigned>(g_config.debugDumpDelay * 1000.0f));
         }
         if (game::DlssOptionOn()) recompute = true;
     }
     ReloadGameOptionsIfChanged();
 }
 
-bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
+bool InstallTables() {
     std::lock_guard lock(g_mutex);
-    g_dataDir = dataDir;
-    g_gameDir = gameDir;
 
     g_params.Set(NVSDK_NGX_Parameter_SuperSampling_Available, 1);
     g_params.Set("ImageSignalProcessing.Available", 1);
@@ -930,7 +808,6 @@ bool InstallTables(const std::wstring& dataDir, const std::wstring& gameDir) {
     game::SetFrameStartCallback(&OnFrameStart);
     game::SetFrameCallback(&OnFrame);
     game::SetUpdateCallback(&OnUpdate);
-    LOGD("Renderer at MHW-FSR install: {}", game::DescribeState());
     return true;
 }
 
@@ -943,8 +820,8 @@ void ResetAllFeatures() {
     }
 }
 
-bool Install(const std::wstring& dataDir, const std::wstring& gameDir) {
-    if (!InstallTables(dataDir, gameDir)) return false;
+bool Install() {
+    if (!InstallTables()) return false;
     if (game::Context() && game::DlssEnabledInGame() && game::RecomputeRenderScale()) {
         LOGD("FSR was already on, render scale refreshed");
     }

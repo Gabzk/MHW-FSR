@@ -2,17 +2,14 @@
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <cstdint>
 
 namespace mhwfsr::overlay {
-
-// Checks whether the in-game overlay has attached to the game's swapchain
-bool IsInstalled();
 
 // Tries to hook the DX12 swapchain if available from game::SwapChain()
 void TryInstall();
 
-// Frame callbacks called from HookPresent / HookResizeBuffers
-void OnPresent(IDXGISwapChain3* swapChain);
+// Frame callbacks called from HookResizeBuffers
 void OnPreResize();
 void OnPostResize(IDXGISwapChain3* swapChain);
 

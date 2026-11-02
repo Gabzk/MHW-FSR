@@ -6,10 +6,11 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <format>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
-#include "config.h"
 #include "log.h"
 #include "memory.h"
 #include "overlay/overlay.h"
@@ -50,7 +51,6 @@ constexpr ptrdiff_t kTextureDepthNative = 0xf0;
 // Natives are reference counted; the game releases them at +0x2554f90 (lock xadd -1, destroyed
 // when the count was 1).
 constexpr ptrdiff_t kNativeRefCount = 0x8;
-constexpr ptrdiff_t kNativeResource11 = 0x18;
 constexpr ptrdiff_t kNativeResource12 = 0x20;
 constexpr ptrdiff_t kDrawContextView = 0x1d0;
 constexpr ptrdiff_t kViewTargets = 0x628;
@@ -93,11 +93,9 @@ constexpr std::string_view kApiFlagPattern =
 // operator new: forwards to the MT Framework allocator (vtable +0x48, 16-byte alignment).
 constexpr std::string_view kOperatorNewPattern =
     "4C 8B 0D ?? ?? ?? ?? 4D 85 C9 74 ?? 49 8B 01 48 8B D1 41 B8 10 00 00 00 49 8B C9 48 FF 60 48";
-constexpr ptrdiff_t kDeviceImmediateContext11 = 0x1400;
 // Swap chains of the device (count at +0x14a0, 0x48 bytes each): the D3D12 present calls Present on
-// the interface at +0x1470 (exe +0x23aa1d4), the D3D11 present on the one at +0x1488 (+0x23aa330).
+// the interface at +0x1470 (exe +0x23aa1d4).
 constexpr ptrdiff_t kDeviceSwapChain12 = 0x1470;
-constexpr ptrdiff_t kDeviceSwapChain11 = 0x1488;
 constexpr ptrdiff_t kDeviceSwapChainCount = 0x14a0;
 // Render thread (config.ini RenderingThread=ON): started each frame through the event at +0x1b8,
 // signals +0x1c0 when it has submitted the frame.
@@ -148,36 +146,14 @@ void (*g_inputCallback)() = nullptr;
 void** g_setEventImport = nullptr;
 void** g_waitImport = nullptr;
 
-// Renderer frame of the last DLSS evaluation, plus one (0 = none yet).
+// Renderer frame of the last FSR evaluation, plus one (0 = none yet).
 std::atomic<uint64_t> g_lastDlssFrame{0};
-// Since the last JitterStats() call.
-std::atomic<uint64_t> g_jitterFrames{0};
-std::atomic<uint64_t> g_jitterSetByPlugin{0};
-std::atomic<uint64_t> g_sharpenSuppressed{0};
 
-// The hooks run on several game threads at once (the TAA pass is built on worker threads, the
-// update on the main thread), so they read their settings from here, published by ApplyConfig,
-// instead of from g_config while an ini reload replaces it.
-struct HookSettings {
-    std::atomic<bool> bypass{false};
-    std::atomic<bool> forceJitter{true};
-    std::atomic<bool> fullPixelJitter{true};
-    std::atomic<bool> verboseFrames{false};
-    std::atomic<bool> debugFixedJitter{false};
-    std::atomic<float> debugJitterX{0.0f};
-    std::atomic<float> debugJitterY{0.0f};
-    std::atomic<bool> reflectionFix{true};
-    std::atomic<int> jitterPhases{-1};
-    std::atomic<float> mipBias{std::numeric_limits<float>::quiet_NaN()};
-};
-HookSettings g_settings;
 // Until the NGX side is installed the hooks only call the game's functions.
 std::atomic<bool> g_active{false};
-std::atomic<bool> g_dlssUnavailable{false};
 void (*g_updateCallback)() = nullptr;
 
 struct JitterRecord {
-    const void* resource11 = nullptr;
     const void* resource12 = nullptr;
     Jitter jitter;
 };
@@ -186,12 +162,10 @@ std::array<JitterRecord, 32> g_jitterRecords;
 size_t g_jitterNext = 0;
 
 // Camera cuts. The game only asks DLSS for a reset when it rebuilds the TAA history (render size
-// changes, loading); a cut in a cutscene keeps the history, and DLSS then blends the previous shot
+// changes, loading); a cut in a cutscene keeps the history, and FSR then blends the previous shot
 // into the first frames of the new one. A cut is a jump of the main viewport's camera position
 // since the last frame that built the TAA pass.
-constexpr float kCutDistance = 1500.0f;    // world units (centimetres; 15m jump)
-constexpr float kCutTurnCos = 0.3420f;     // 70 degrees (logged for diagnostics)
-constexpr float kCutProjection = 0.25f;    // relative change of the projection's x/y scale
+constexpr float kCutDistance = 10000.0f;   // world units (centimetres; 100m jump: genuine teleport / camp fast-travel only)
 
 struct CameraShot {
     std::array<float, 3> position{};
@@ -202,63 +176,79 @@ struct CameraShot {
     float fovY = 0.785398f;
     float nearZ = 0.1f;
     float farZ = 1000.0f;
+    bool infiniteDepth = false;
     int viewport = 0;
 };
 uint64_t g_cutFrame = 0;  // renderer frame of the last camera read
 bool g_cutFrameIsCut = false;
 std::optional<CameraShot> g_lastShot;
 int g_shotViewport = -2;  // viewport of the last read, -1 none, -2 not read yet
-std::atomic<uint64_t> g_cuts{0};
 int g_viewportLogs = 0;
+
+std::optional<CameraShot> ParseViewport(const uint8_t* vp, int index) {
+    auto view = mem::SafeRead<std::array<float, 16>>(vp + kViewportView);
+    auto proj = mem::SafeRead<std::array<float, 16>>(vp + kViewportProj);
+    if (!view || !proj) return std::nullopt;
+    const auto& v = *view;
+    CameraShot shot;
+    shot.viewport = index;
+    for (int j = 0; j < 3; ++j) {
+        shot.position[j] = -(v[12] * v[j * 4 + 0] + v[13] * v[j * 4 + 1] + v[14] * v[j * 4 + 2]);
+        shot.right[j] = v[j * 4 + 0];
+        shot.up[j] = v[j * 4 + 1];
+        shot.forward[j] = v[j * 4 + 2];
+    }
+    shot.scale = {(*proj)[0], (*proj)[5]};
+    if (std::abs((*proj)[5]) > 1e-4f) {
+        shot.fovY = 2.0f * std::atan(1.0f / std::abs((*proj)[5]));
+    }
+    float A = (*proj)[10];
+    float B = (*proj)[14];
+    // MHW uses Reversed-Z (z_ndc = 1 at near, 0 at far) and Right-Handed view space (A > 0, B > 0).
+    // Using |A| and |B| makes the extraction invariant to LH vs RH sign conventions:
+    // near_cm = |B| / (1 + |A|), far_cm = |B| / |A|, then convert centimetres -> meters (* 0.01f).
+    float absA = std::abs(A);
+    float absB = std::abs(B);
+    if (absA < 1e-5f) {
+        shot.nearZ = absB > 0.001f ? absB * 0.01f : 0.1f;
+        shot.farZ = 1000.0f;
+        shot.infiniteDepth = true;
+    } else {
+        shot.nearZ = (absB / (1.0f + absA)) * 0.01f;
+        shot.farZ = (absB / absA) * 0.01f;
+        shot.infiniteDepth = (shot.farZ >= 999.0f);
+    }
+    if (shot.nearZ < 0.001f || shot.nearZ > 10.0f || !std::isfinite(shot.nearZ)) shot.nearZ = 0.1f;
+    if (shot.farZ <= shot.nearZ * 100.0f || !std::isfinite(shot.farZ)) shot.farZ = 1000.0f;
+    if (shot.fovY <= 0.0f || !std::isfinite(shot.fovY)) shot.fovY = 0.785398f;
+
+    bool finite = std::ranges::all_of(v, [](float x) { return std::isfinite(x); }) &&
+                  std::isfinite(shot.scale[0]) && std::isfinite(shot.scale[1]);
+    if (!finite) return std::nullopt;
+    return shot;
+}
 
 // The main viewport (active, pass 0, drawn to the screen) of the camera, as position, view direction
 // and projection scale. View matrices are row-vector (world * V), so V = [R 0; t 1] and the camera
 // position is -t * R^T.
 std::optional<CameraShot> ReadShot(uint8_t* camera) {
     for (int i = 0; i < kViewportCount; ++i) {
-        uint8_t* vp = camera + kCameraViewports + i * kViewportStride;
+        const uint8_t* vp = camera + kCameraViewports + i * kViewportStride;
         auto active = mem::SafeRead<uint8_t>(vp + kViewportActive);
         auto pass = mem::SafeRead<uint8_t>(vp + kViewportPass);
         auto target = mem::SafeRead<void*>(vp + kViewportTarget);
         if (!active || !*active || !pass || *pass != 0 || !target || *target) continue;
-        auto view = mem::SafeRead<std::array<float, 16>>(vp + kViewportView);
-        auto proj = mem::SafeRead<std::array<float, 16>>(vp + kViewportProj);
-        if (!view || !proj) return std::nullopt;
-        const auto& v = *view;
-        CameraShot shot;
-        shot.viewport = i;
-        for (int j = 0; j < 3; ++j) {
-            shot.position[j] = -(v[12] * v[j * 4 + 0] + v[13] * v[j * 4 + 1] + v[14] * v[j * 4 + 2]);
-            shot.right[j] = v[j * 4 + 0];
-            shot.up[j] = v[j * 4 + 1];
-            shot.forward[j] = v[j * 4 + 2];
-        }
-        shot.scale = {(*proj)[0], (*proj)[5]};
-        if (std::abs((*proj)[5]) > 1e-4f) {
-            shot.fovY = 2.0f * std::atan(1.0f / std::abs((*proj)[5]));
-        }
-        float A = (*proj)[10];
-        float B = (*proj)[14];
-        // MHW uses Reversed-Z (z_ndc = 1 at near, 0 at far) and Right-Handed view space (A > 0, B > 0).
-        // Using |A| and |B| makes the extraction invariant to LH vs RH sign conventions:
-        // near_cm = |B| / (1 + |A|), far_cm = |B| / |A|, then convert centimetres -> meters (* 0.01f).
-        float absA = std::abs(A);
-        float absB = std::abs(B);
-        if (absA < 1e-5f) {
-            shot.nearZ = absB > 0.001f ? absB * 0.01f : 0.1f;
-            shot.farZ = 1000.0f;
-        } else {
-            shot.nearZ = (absB / (1.0f + absA)) * 0.01f;
-            shot.farZ = (absB / absA) * 0.01f;
-        }
-        if (shot.nearZ < 0.001f || shot.nearZ > 10.0f || !std::isfinite(shot.nearZ)) shot.nearZ = 0.1f;
-        if (shot.farZ <= shot.nearZ * 100.0f || !std::isfinite(shot.farZ)) shot.farZ = 1000.0f;
-        if (shot.fovY <= 0.0f || !std::isfinite(shot.fovY)) shot.fovY = 0.785398f;
+        if (auto shot = ParseViewport(vp, i)) return shot;
+        return std::nullopt;
+    }
 
-        bool finite = std::ranges::all_of(v, [](float x) { return std::isfinite(x); }) &&
-                      std::isfinite(shot.scale[0]) && std::isfinite(shot.scale[1]);
-        if (!finite) return std::nullopt;
-        return shot;
+    // Fallback: If no main viewport was drawn directly to screen (e.g. cutscene or offscreen zoom pass),
+    // extract camera parameters from any active viewport with valid matrices.
+    for (int i = 0; i < kViewportCount; ++i) {
+        const uint8_t* vp = camera + kCameraViewports + i * kViewportStride;
+        auto active = mem::SafeRead<uint8_t>(vp + kViewportActive);
+        if (!active || !*active) continue;
+        if (auto shot = ParseViewport(vp, i)) return shot;
     }
     return std::nullopt;
 }
@@ -292,17 +282,14 @@ bool CameraCut(uint8_t* camera, uint64_t frame) {
             lb += b.forward[j] * b.forward[j];
         }
         float cosTurn = la > 0.0f && lb > 0.0f ? dot / std::sqrt(la * lb) : 1.0f;
-        float zoom = 0.0f;
-        for (int j = 0; j < 2; ++j)
-            if (a.scale[j] != 0.0f) zoom = std::max(zoom, std::abs(b.scale[j] / a.scale[j] - 1.0f));
         // Only trigger a full temporal history wipe (dp.reset = true) on real camera position teleports
-        // (> 15m). Dynamic FOV zoom during weapon attacks (TCS, Helmbreaker, Bow/HBG aim, monster roars)
+        // (> 100m). Dynamic FOV zoom during weapon attacks (TCS, Helmbreaker, Bow/HBG aim, monster roars)
         // or fast Focus Camera turns are already represented in the engine's motion vectors; resetting
         // FSR's temporal accumulation on zoom/turn causes a sudden split-second blurry screen.
         g_cutFrameIsCut = d2 > kCutDistance * kCutDistance;
-        if (g_cutFrameIsCut && g_cuts.fetch_add(1) < 20)
-            LOGD("camera cut at frame {}: moved {:.0f}, turned {:.0f} degrees, zoom {:.1f}%; DLSS history reset",
-                 frame, std::sqrt(d2), std::acos(std::clamp(cosTurn, -1.0f, 1.0f)) * 57.29578f, zoom * 100.0f);
+        if (g_cutFrameIsCut)
+            LOGI("camera cut at frame {}: moved {:.0f} (> {:.0f}m), turned {:.0f} degrees; FSR history reset",
+                 frame, std::sqrt(d2), kCutDistance * 0.01f, std::acos(std::clamp(cosTurn, -1.0f, 1.0f)) * 57.29578f);
     }
     if (shot) {
         g_lastShot = shot;
@@ -329,14 +316,11 @@ void CaptureJitter(uint8_t* taa) {
     if (!native || !*native) return;
 
     JitterRecord rec;
-    rec.resource11 = mem::SafeRead<void*>(*native + kNativeResource11).value_or(nullptr);
     rec.resource12 = mem::SafeRead<void*>(*native + kNativeResource12).value_or(nullptr);
     rec.jitter = {(*jitter)[0], (*jitter)[1], *frame};
 
     static std::atomic<uint64_t> logged{0};
-    uint64_t n = logged.load();
-    if (n < 4 || (g_settings.verboseFrames && n < 40)) {
-        ++logged;
+    if (logged.fetch_add(1) < 4) {
         // Inputs of the TAA update's jitter decision, to explain a zero jitter.
         LOGD("jitter capture: frame {}, slot {}, jitter {:.4f},{:.4f}, camera frame {}, render frame {}, blend {:.3f}, "
              "type {}, flags {:#x}, enabled {}, view flags {:#x}",
@@ -355,11 +339,18 @@ void CaptureJitter(uint8_t* taa) {
         rec.jitter.fovY = g_lastShot->fovY;
         rec.jitter.cameraNear = g_lastShot->nearZ;
         rec.jitter.cameraFar = g_lastShot->farZ;
+        rec.jitter.infiniteDepth = g_lastShot->infiniteDepth;
         for (int j = 0; j < 3; ++j) {
             rec.jitter.cameraPosition[j] = g_lastShot->position[j];
             rec.jitter.cameraUp[j] = g_lastShot->up[j];
             rec.jitter.cameraRight[j] = g_lastShot->right[j];
             rec.jitter.cameraForward[j] = g_lastShot->forward[j];
+        }
+    }
+    for (auto& existing : g_jitterRecords) {
+        if (existing.jitter.frame == *frame && existing.resource12 == rec.resource12) {
+            existing = rec;
+            return;
         }
     }
     g_jitterRecords[g_jitterNext] = rec;
@@ -411,8 +402,8 @@ const float* HaltonForFrame(uint8_t* renderer, uint8_t* scene) {
 }
 
 // Besides the enable switch, the TAA update only jitters when the scene's TAA settings say so
-// (blend rate, filter type and flags). DLSS needs the jitter whenever it runs, so when the
-// update left the camera alone and DLSS ran in the last frames, the jitter is set here the same
+// (blend rate, filter type and flags). FSR needs the jitter whenever it runs, so when the
+// update left the camera alone and FSR ran in the last frames, the jitter is set here the same
 // way the update does it. Returns false when the camera keeps its value.
 bool EnsureJitter(uint8_t* taa) {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
@@ -425,7 +416,7 @@ bool EnsureJitter(uint8_t* taa) {
 
     uint64_t frame = *reinterpret_cast<uint64_t*>(renderer + kRendererFrame);
     uint64_t last = g_lastDlssFrame.load();
-    if (!last || frame + 1 > last + 4) return false;  // DLSS is not running
+    if (!last || frame + 1 > last + 4) return false;  // FSR is not running
     auto view = mem::SafeRead<uint8_t*>(renderer + kRendererView);
     if (!view || !*view) return false;
     auto flags = mem::SafeRead<uint32_t>(*view + kViewFlags);
@@ -435,12 +426,11 @@ bool EnsureJitter(uint8_t* taa) {
     jitter[1] = halton[1];
     *reinterpret_cast<uint32_t*>(camera + kCameraJitterFrame) =
         *reinterpret_cast<uint32_t*>(renderer + kRendererRenderFrame);
-    ++g_jitterSetByPlugin;
     static bool logged = false;
     if (!logged) {
         logged = true;
         LOGD("jitter: the TAA update did not jitter the camera (blend {:.3f}, type {}, flags {:#x}, enabled {}); "
-             "the plugin does while DLSS runs",
+             "the plugin does while FSR runs",
              mem::SafeRead<float>(taa + 0x180).value_or(-1.0f), mem::SafeRead<uint32_t>(taa + 0xc).value_or(0),
              mem::SafeRead<uint32_t>(taa + 0x14).value_or(0), mem::SafeRead<uint8_t>(taa + kTaaJitterEnable).value_or(0));
     }
@@ -449,13 +439,13 @@ bool EnsureJitter(uint8_t* taa) {
 
 // The game turns the Halton value h into a clip-space offset of h / output size, which moves the
 // image by h / 2 * render scale render pixels: its jitter covers less than half a pixel. With
-// DLSS the camera value is replaced right after the TAA update sets it, by a sample that moves the
+// FSR the camera value is replaced right after the TAA update sets it, by a sample that moves the
 // image by up to half a render pixel each way, so the samples spread over a whole render pixel.
 //
-// The game's sequence has 20 phases (Halton(2,3) indices 20..39). DLSS needs 8 per output pixel
-// covered by a render pixel (DLSS guide, 3.7.1): 18 in Quality, 24 in Balanced, 32 in Performance.
-// With 20 phases (DLAA, Quality, or JitterPhases=20) the plugin keeps the game's table; otherwise it
-// writes Halton(2,3) from index 1 with max(20, 8 / scale^2) phases. Only with FullPixelJitter.
+// The game's sequence has 20 phases (Halton(2,3) indices 20..39). Temporal upscaling needs 8 per
+// output pixel covered by a render pixel: 18 in Quality, 24 in Balanced, 32 in Performance.
+// With 20 phases (NativeAA or Quality) the plugin keeps the game's table; otherwise it writes
+// Halton(2,3) from index 1 with max(20, 8 / scale^2) phases.
 float Halton(uint32_t index, uint32_t base) {
     float f = 1.0f, r = 0.0f;
     while (index > 0) {
@@ -467,9 +457,6 @@ float Halton(uint32_t index, uint32_t base) {
 }
 
 uint32_t JitterPhases(float scale) {
-    int setting = g_settings.jitterPhases;
-    if (setting > 0) return static_cast<uint32_t>(setting);
-    if (setting == 0) return static_cast<uint32_t>(kHaltonCount);
     auto wanted = static_cast<uint32_t>(std::ceil(8.0f / (scale * scale) - 0.01f));
     return std::max(static_cast<uint32_t>(kHaltonCount), wanted);
 }
@@ -500,10 +487,10 @@ void WidenJitter() {
 // The scene's anti-aliasing switches, TAA in the low byte and FXAA in the high byte of a word at
 // scene + g_sceneAa. The game sets them from the Anti-Aliasing option when it applies graphics
 // options (+0x43dcb0), and the TAA and FXAA filters follow them every frame. With DLSS on, that
-// apply sets TAA only for render scales below 1, but at 1 (DLAA, which the stock game never had)
-// it keeps the option, which the game greys out while DLSS is on: FXAA then ran over the DLSS
-// output, and Off or FXAA turned the TAA filter off, and with it DLSS, which runs inside it. So
-// while DLSS runs the switches are held at TAA only.
+// apply sets TAA only for render scales below 1, but at 1 (NativeAA, which the stock game never had)
+// it keeps the option, which the game greys out while DLSS is on: FXAA then ran over the upscaler
+// output, and Off or FXAA turned the TAA filter off, and with it FSR, which runs inside it. So
+// while FSR runs the switches are held at TAA only.
 constexpr uint16_t kAaTaaOnly = 0x0001;
 ptrdiff_t g_sceneAa = 0;
 std::mutex g_aaMutex;
@@ -511,10 +498,6 @@ uint8_t* g_aaScene = nullptr;
 bool g_aaHeld = false;
 uint16_t g_aaGame = 0;  // the game's own setting, last seen
 bool g_aaOurs = false;  // the word still holds what the plugin wrote (the game has not set it since)
-
-// Bypass shows the game's TAA instead of DLSS, in DLAA only: the upscaling modes need the TAA
-// pass and the jitter for DLSS at the DLISP position either way.
-bool Bypassed() { return g_settings.bypass && !DlispActive(); }
 
 std::string AaName(uint16_t value) {
     switch (value) {
@@ -539,13 +522,11 @@ void HoldTaaOnly() {
     uint16_t current = *word;
     if (current != kAaTaaOnly) g_aaOurs = false;  // the game has set it since
     bool dlss = DlssEnabledInGame();
-    bool bypassed = Bypassed();
-    bool unavailable = g_dlssUnavailable;
-    if (dlss && !bypassed && !unavailable) {
+    if (dlss) {
         // Any other value was set by the game (at start, or when it applied the options again).
         if (current != kAaTaaOnly) {
             if (!g_aaHeld || current != g_aaGame)
-                LOGD("anti-aliasing: the game set {}; TAA only while DLSS runs", AaName(current));
+                LOGD("anti-aliasing: the game set {}; TAA only while FSR runs", AaName(current));
             g_aaGame = current;
             *word = kAaTaaOnly;
             g_aaOurs = true;
@@ -555,13 +536,9 @@ void HoldTaaOnly() {
         g_aaHeld = true;
     } else if (g_aaHeld) {
         g_aaHeld = false;
-        // Turning DLSS off makes the game apply the option again (after clearing the DLSS state
-        // checked above), so only a hold the plugin ends itself has a setting to give back.
         if (dlss && g_aaOurs && g_aaGame != kAaTaaOnly) {
             *word = g_aaGame;
             g_aaOurs = false;
-            LOGD("anti-aliasing: back to the game's {} ({})", AaName(g_aaGame),
-                 unavailable ? "DLSS is not available" : "Bypass");
         }
     }
 }
@@ -572,12 +549,8 @@ void HoldTaaOnly() {
 // a different one every frame in a four-frame cycle (from the frame counter), and the next pass
 // keeps 99.99% of that history (clamped to the neighbours). That spreads the history over each
 // 2x2 block of render pixels: the reflections get nearly constant per block and change every
-// frame. Measured: inside a block, neighbouring pixels of the history differ by a third of what
-// they differ by across a block border. The game's TAA at native resolution hid it; DLSS scales
-// the blocks up instead (4x4 screen pixels in Performance) and its input changes twice as much
-// between frames where reflections dominate. The resolve without the switch is the same shader
-// without that fetch offset, so the switch is held off while DLSS runs (developer key
-// ReflectionFix, on by default).
+// frame. The resolve without the switch is the same shader without that fetch offset, so the
+// switch is held off while FSR runs.
 ptrdiff_t g_sceneSslrJitter = 0;
 std::mutex g_sslrMutex;
 uint8_t* g_sslrScene = nullptr;
@@ -599,10 +572,10 @@ void HoldReflectionJitterOff() {
     auto* flag = reinterpret_cast<volatile uint8_t*>(scene + g_sceneSslrJitter);
     uint8_t current = *flag;
     if (current != 0) g_sslrOurs = false;  // the game has set it since
-    if (g_settings.reflectionFix && DlssEnabledInGame() && !Bypassed() && !g_dlssUnavailable) {
+    if (DlssEnabledInGame()) {
         if (current != 0) {
             // Once per hold: the game sets the switch when the scene starts, maybe after the hold began.
-            if (!g_sslrLogged) LOGD("reflections: the game's 2x2 reflection filter is off while DLSS runs");
+            if (!g_sslrLogged) LOGD("reflections: the game's 2x2 reflection filter is off while FSR runs");
             g_sslrLogged = true;
             g_sslrGame = current;
             *flag = 0;
@@ -626,9 +599,9 @@ void HoldReflectionJitterOff() {
 // without bias, banks 1..7 at -log2(2, 2.5, 3, 3.5, 4, 4.5, 5) mip levels, banks 8..14 the same
 // positive. A material takes its samplers from the bank the scene's mSamplerLodBias names
 // (scene + g_sceneSamplerBank) when it is loaded (+0x2383566), so a bank set here applies to areas
-// loaded afterwards. With DLSS the textures should be sampled for the output resolution: NVIDIA
-// recommends log2(render scale) - 1 (the game's own dynamic resolution uses the same), which the
-// banks match closely: DLAA -1, Quality -1.58, Balanced -1.81, Performance -2.
+// loaded afterwards. With FSR the textures should be sampled for the output resolution:
+// log2(render scale) - 1 (the game's own dynamic resolution uses the same), which the banks match
+// closely: NativeAA -1, Quality -1.58, Balanced -1.81, Performance -2.
 ptrdiff_t g_sceneSamplerBank = 0;
 std::mutex g_bankMutex;
 uint8_t* g_bankScene = nullptr;
@@ -657,11 +630,10 @@ void HoldMipBias() {
     auto* bank = reinterpret_cast<volatile uint32_t*>(scene + g_sceneSamplerBank);
     uint32_t current = *bank;
     if (g_bankOurs && current != g_bankOurs) g_bankOurs = 0;  // the game has set it since
-    float bias = g_settings.mipBias;
     float scale = RenderScale();
-    if (std::isnan(bias)) bias = std::log2(scale) - 1.0f;
+    float bias = std::log2(scale) - 1.0f;
     uint32_t wanted = BankFor(bias);
-    if (DlssEnabledInGame() && !Bypassed() && !g_dlssUnavailable && wanted != 0) {
+    if (DlssEnabledInGame() && wanted != 0) {
         if (current != wanted) {
             if (!g_bankOurs) g_bankGame = current;
             *bank = wanted;
@@ -700,11 +672,10 @@ public:
         h.cleared = suppress && h.saved;
         if (!h.cleared) return;
         taa[kTaaSharpen] = 0;
-        ++g_sharpenSuppressed;
         static bool logged = false;
         if (!logged) {
             logged = true;
-            LOGD("game: TAA sharpen pass (amount {:.3f}) turned off while DLSS runs",
+            LOGD("game: TAA sharpen pass (amount {:.3f}) turned off while FSR runs",
                  mem::SafeRead<float>(taa + 0x198).value_or(-1.0f));
         }
     }
@@ -722,7 +693,7 @@ private:
     uint8_t* taa_;
 };
 
-// Scene parameters may turn the TAA jitter off (the title screen does). DLSS needs the
+// Scene parameters may turn the TAA jitter off (the title screen does). FSR needs the
 // sub-pixel jitter, so it is switched on for the duration of the update that applies it.
 // The update runs every frame, also while the TAA filter is switched off.
 void* __fastcall HookTaaUpdate(void* self) {
@@ -731,26 +702,15 @@ void* __fastcall HookTaaUpdate(void* self) {
     HoldTaaOnly();
     HoldReflectionJitterOff();
     HoldMipBias();
-    if (!DlssEnabledInGame() || Bypassed()) return g_origTaaUpdate(self);
+    if (!DlssEnabledInGame()) return g_origTaaUpdate(self);
     auto* taa = static_cast<uint8_t*>(self);
     auto* enable = taa + kTaaJitterEnable;
     uint8_t saved = *enable;
-    bool forceJitter = g_settings.forceJitter;
-    if (forceJitter) *enable = 1;
+    *enable = 1;
     void* result = g_origTaaUpdate(self);
     *enable = saved;
-    ++g_jitterFrames;
-    if (g_settings.debugFixedJitter) {
-        // Constant jitter for checking the sign convention (DLSS guide, section 8.4.2).
-        if (uint8_t* camera = g_camera ? *g_camera : nullptr) {
-            auto* jitter = reinterpret_cast<float*>(camera + kCameraJitter);
-            jitter[0] = g_settings.debugJitterX;
-            jitter[1] = g_settings.debugJitterY;
-        }
-        return result;
-    }
-    if (forceJitter) EnsureJitter(taa);
-    if (g_settings.fullPixelJitter) WidenJitter();
+    EnsureJitter(taa);
+    WidenJitter();
     return result;
 }
 
@@ -762,8 +722,8 @@ void* __fastcall HookTaaDraw(void* self, void* drawContext) {
     auto* taa = static_cast<uint8_t*>(self);
     bool dlss = DlssEnabledInGame();
     // With the TAA sharpen pass on, the game points DLSS at the next history slot and then has the
-    // sharpen pass write the sharpened TAA result over it. The pass stays off while DLSS runs.
-    SharpenGuard sharpen(taa, dlss && !Bypassed());
+    // sharpen pass write the sharpened TAA result over it. The pass stays off while FSR runs.
+    SharpenGuard sharpen(taa, dlss);
     if (dlss) PatchViewDepth(static_cast<uint8_t*>(drawContext));
     CaptureJitter(taa);
     return g_origTaaDraw(self, drawContext);
@@ -774,7 +734,10 @@ uint8_t* ExeBase() { return reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)
 uintptr_t Rva(const void* p) { return static_cast<uintptr_t>(static_cast<const uint8_t*>(p) - ExeBase()); }
 
 void* __fastcall HookMainUpdate(void* self) {
-    if (g_active && g_frameStartCallback) g_frameStartCallback();
+    if (g_active) {
+        ForceEnableDlssSupport();
+        if (g_frameStartCallback) g_frameStartCallback();
+    }
     return g_origMainUpdate(self);
 }
 
@@ -802,7 +765,7 @@ bool HookFrameUpdate(const mem::Section& text, const mem::Section& rdata, std::s
     auto matches = mem::FindPattern(text, pattern);
     void** slot = matches.size() == 1 ? UniqueSlotOf(rdata, matches[0]) : nullptr;
     if (!slot) {
-        LOGW("game: {} not found ({} matches); NVIDIA Reflex works without it", name, matches.size());
+        LOGW("game: {} not found ({} matches); Anti-Lag 2 works without it", name, matches.size());
         return false;
     }
     original = reinterpret_cast<FrameUpdateFn>(*slot);
@@ -879,7 +842,7 @@ bool Init() {
         g_sceneAa = offset;
         LOGD("game: anti-aliasing switches at scene +{:#x} (setter +{:#x})", offset, Rva(aaSetter[0]));
     } else {
-        LOGW("game: anti-aliasing setter matched {} times; the Anti-Aliasing option stays in effect with DLSS",
+        LOGW("game: anti-aliasing setter matched {} times; the Anti-Aliasing option stays in effect with FSR",
              aaSetter.size());
     }
 
@@ -890,7 +853,7 @@ bool Init() {
         g_sceneSslrJitter = offset;
         LOGD("game: reflection filter switch at scene +{:#x} (+{:#x})", offset, Rva(sslrSelect[0]));
     } else {
-        LOGW("game: reflection technique choice matched {} times; ReflectionFix has no effect", sslrSelect.size());
+        LOGW("game: reflection technique choice matched {} times; reflection fix has no effect", sslrSelect.size());
     }
 
     auto samplerBank = mem::FindPattern(*text, kSamplerBankPattern);
@@ -923,7 +886,7 @@ bool Init() {
         LOGW("game: operator new matched {} times", opNew.size());
     }
 
-    // For NVIDIA Reflex: the start of each frame, the input poll and the render thread's events.
+    // For Anti-Lag 2 and frame pacing: the start of each frame, the input poll and the render thread's events.
     HookFrameUpdate(*text, *rdata, kMainUpdatePattern, "frame update", reinterpret_cast<void*>(&HookMainUpdate),
                     g_origMainUpdate);
     HookFrameUpdate(*text, *rdata, kMouseUpdatePattern, "mouse update", reinterpret_cast<void*>(&HookMouseUpdate),
@@ -946,12 +909,6 @@ std::optional<bool> IsDx12() {
     return *g_apiFlag != 0;
 }
 
-void* ImmediateContext11() {
-    uint8_t* device = Device();
-    if (!device) return nullptr;
-    return mem::SafeRead<void*>(device + kDeviceImmediateContext11).value_or(nullptr);
-}
-
 void* GameAlloc(size_t size) { return g_operatorNew ? g_operatorNew(size) : nullptr; }
 
 void SetFrameCallback(void (*callback)()) { g_frameCallback = callback; }
@@ -965,9 +922,9 @@ void SetInputCallback(void (*callback)()) { g_inputCallback = callback; }
 void* SwapChain() {
     uint8_t* device = Device();
     auto dx12 = IsDx12();
-    if (!device || !dx12) return nullptr;
+    if (!device || !dx12 || !*dx12) return nullptr;
     if (mem::SafeRead<uint32_t>(device + kDeviceSwapChainCount).value_or(0) == 0) return nullptr;
-    return mem::SafeRead<void*>(device + (*dx12 ? kDeviceSwapChain12 : kDeviceSwapChain11)).value_or(nullptr);
+    return mem::SafeRead<void*>(device + kDeviceSwapChain12).value_or(nullptr);
 }
 
 RenderEvents RenderThreadEvents() {
@@ -981,21 +938,7 @@ void** SetEventImport() { return g_setEventImport; }
 
 void** WaitForSingleObjectImport() { return g_waitImport; }
 
-void ApplyConfig(const Config& config) {
-    g_settings.bypass = config.bypass;
-    g_settings.forceJitter = config.forceJitter;
-    g_settings.fullPixelJitter = config.fullPixelJitter;
-    g_settings.verboseFrames = config.verboseFrames;
-    g_settings.debugFixedJitter = config.debugFixedJitter;
-    g_settings.debugJitterX = config.debugJitterX;
-    g_settings.debugJitterY = config.debugJitterY;
-    g_settings.reflectionFix = config.reflectionFix;
-    g_settings.jitterPhases = config.jitterPhases;
-    g_settings.mipBias = config.mipBias;
-}
-
-void Activate(const Config& config) {
-    ApplyConfig(config);
+void Activate() {
     g_active = true;
 }
 
@@ -1004,13 +947,10 @@ uint64_t Frame() {
     return renderer ? mem::SafeRead<uint64_t>(renderer + kRendererFrame).value_or(0) : 0;
 }
 
-void SetDlssUnavailable(bool unavailable) { g_dlssUnavailable = unavailable; }
-
 void ForceEnableDlssSupport() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
     if (renderer) {
-        auto* bits = reinterpret_cast<uint32_t*>(renderer + kRendererDlssBits);
-        *bits |= 3;  // DLSS (bit 0) | DLISP (bit 1)
+        *reinterpret_cast<uint32_t*>(renderer + kRendererDlssBits) |= 3;
     }
 }
 
@@ -1037,47 +977,18 @@ bool RecomputeRenderScale() {
     return true;
 }
 
-RendererState ReadState() {
-    RendererState s;
-    uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
-    if (!renderer) return s;
-    auto u8 = [&](ptrdiff_t off) { return mem::SafeRead<uint8_t>(renderer + off).value_or(0); };
-    auto u32 = [&](ptrdiff_t off) { return mem::SafeRead<uint32_t>(renderer + off).value_or(0); };
-    auto f32 = [&](ptrdiff_t off) { return mem::SafeRead<float>(renderer + off).value_or(0.0f); };
-    s.exists = true;
-    s.dlssOn = u8(kRendererDlssOn);
-    s.dlispOn = u8(kRendererDlispOn);
-    s.mode = u32(0xa8);
-    s.dlssScale = f32(0xb0);
-    s.featureBits = u32(kRendererDlssBits);
-    s.scaleRequested = f32(0x200);
-    s.scaleApplied = f32(kRendererScaleApplied);
-    s.context = Context();
-    return s;
-}
-
-std::string DescribeState(const RendererState& s) {
-    if (!s.exists) return "renderer not created";
-    return std::format(
-        "DLSS on {}, DLISP on {}, mode {}, DLSS scale {:.3f}, feature bits {}, render scale {:.3f}/{:.3f}, "
-        "context {}",
-        s.dlssOn, s.dlispOn, s.mode, s.dlssScale, s.featureBits, s.scaleRequested, s.scaleApplied, s.context);
-}
-
 float RenderScale() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
     float scale = renderer ? mem::SafeRead<float>(renderer + kRendererScaleApplied).value_or(1.0f) : 1.0f;
     return std::clamp(scale, 0.25f, 1.0f);
 }
 
-bool DlispActive() {
+bool SceneResolveActive() {
     uint8_t* renderer = g_renderer ? *g_renderer : nullptr;
-    if (!renderer || !DlssEnabledInGame()) return false;
+    if (!renderer) return false;
     auto on = mem::SafeRead<uint8_t>(renderer + kRendererDlispOn).value_or(0);
     auto bits = mem::SafeRead<uint32_t>(renderer + kRendererDlssBits).value_or(0);
-    auto scale = mem::SafeRead<float>(renderer + kRendererScaleApplied).value_or(1.0f);
-    // Same test as the game's DLISP pass.
-    return on && (bits & 2) && scale != 1.0f;
+    return on && (bits & 2);
 }
 
 bool DlssOptionOn() {
@@ -1099,23 +1010,48 @@ void NoteDlssEvaluated() {
     g_lastDlssFrame = mem::SafeRead<uint64_t>(renderer + kRendererFrame).value_or(0) + 1;
 }
 
-std::string JitterStats() {
-    uint64_t frames = g_jitterFrames.exchange(0);
-    uint64_t byPlugin = g_jitterSetByPlugin.exchange(0);
-    uint64_t sharpen = g_sharpenSuppressed.exchange(0);
-    return std::format("camera jittered by the plugin in {} of {} frames, TAA sharpen suppressed in {}", byPlugin,
-                       frames, sharpen);
-}
-
 std::optional<Jitter> JitterForOutput(const void* outputResource) {
     std::lock_guard lock(g_jitterMutex);
-    const JitterRecord* best = nullptr;
+    const JitterRecord* bestResource = nullptr;
+    const JitterRecord* latestFrame = nullptr;
     for (const auto& rec : g_jitterRecords) {
-        if (rec.resource11 != outputResource && rec.resource12 != outputResource) continue;
-        if (!best || rec.jitter.frame > best->jitter.frame) best = &rec;
+        if (rec.jitter.frame == 0) continue;
+        if (!latestFrame || rec.jitter.frame > latestFrame->jitter.frame) {
+            latestFrame = &rec;
+        }
+        if (rec.resource12 == outputResource) {
+            if (!bestResource || rec.jitter.frame > bestResource->jitter.frame) {
+                bestResource = &rec;
+            }
+        }
     }
-    if (!best) return std::nullopt;
-    return best->jitter;
+    if (bestResource) return bestResource->jitter;
+    if (latestFrame) return latestFrame->jitter;
+
+    // Direct live camera fallback if no records captured yet (e.g. initial frames or alternate pass)
+    if (uint8_t* camera = g_camera ? *g_camera : nullptr) {
+        auto liveJitter = mem::SafeRead<std::array<float, 2>>(camera + kCameraJitter);
+        if (liveJitter) {
+            Jitter j{};
+            j.x = (*liveJitter)[0];
+            j.y = (*liveJitter)[1];
+            j.frame = Frame();
+            if (g_lastShot) {
+                j.fovY = g_lastShot->fovY;
+                j.cameraNear = g_lastShot->nearZ;
+                j.cameraFar = g_lastShot->farZ;
+                j.infiniteDepth = g_lastShot->infiniteDepth;
+                for (int i = 0; i < 3; ++i) {
+                    j.cameraPosition[i] = g_lastShot->position[i];
+                    j.cameraUp[i] = g_lastShot->up[i];
+                    j.cameraRight[i] = g_lastShot->right[i];
+                    j.cameraForward[i] = g_lastShot->forward[i];
+                }
+            }
+            return j;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace mhwfsr::game

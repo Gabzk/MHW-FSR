@@ -1,13 +1,10 @@
 #pragma once
 
-#include <d3d11.h>
 #include <d3d12.h>
 #include <wrl/client.h>
 
 #include <cstdint>
 #include <functional>
-#include <string>
-#include <utility>
 
 namespace mhwfsr::d3d {
 
@@ -34,42 +31,26 @@ struct TextureInfo {
 };
 
 TextureInfo Info(ID3D12Resource* resource);
-TextureInfo Info(ID3D11Resource* resource);
-
 bool IsFloatFormat(unsigned dxgiFormat);
 
-// A texture owned by the plugin that mirrors `source` (same size and format). D3D12 copies are
-// kept in NON_PIXEL_SHADER_RESOURCE; they are recreated when the source changes size or format,
-// and the old one is retired.
-class Mirror12 {
-public:
-    // Copies `source` (currently in NON_PIXEL_SHADER_RESOURCE) into the mirror.
-    ID3D12Resource* Update(ID3D12GraphicsCommandList* cl, ID3D12Resource* source);
-    // Copies `source` (currently in UNORDERED_ACCESS) into the mirror.
-    ID3D12Resource* UpdateFromUav(ID3D12GraphicsCommandList* cl, ID3D12Resource* source);
-    void Reset() { Retire(std::move(texture_)); }
-
-private:
-    ComPtr<ID3D12Resource> texture_;
-};
-
-class Mirror11 {
-public:
-    ID3D11Resource* Update(ID3D11DeviceContext* ctx, ID3D11Resource* source);
-    void Reset() { texture_.Reset(); }
-
-private:
-    ComPtr<ID3D11Texture2D> texture_;
-};
-
-// Copies a rectangle of `src` (NON_PIXEL_SHADER_RESOURCE) to the same place in `dst`
-// (UNORDERED_ACCESS); both states are restored afterwards.
-void CopyRect12(ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, ID3D12Resource* src, unsigned x, unsigned y,
-                unsigned w, unsigned h);
-void CopyRect11(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src, unsigned x, unsigned y, unsigned w,
-                unsigned h);
-
-// Debug: writes an R11G11B10 texture to `path` as uint32 width, height, float RGB.
-bool DumpTexture11(ID3D11DeviceContext* ctx, ID3D11Resource* texture, const std::wstring& path);
+// TAA-slot upscaling bridge:
+// 1. BeginTaaUpscale12 allocates/returns the full-display-resolution (upW x upH) UAV texture
+//    in D3D12_RESOURCE_STATE_UNORDERED_ACCESS so FSR can upscale directly inside EvaluateAtTaa.
+// 2. FinishTaaUpscale12 transitions the upscaled HDR texture to SRV and downsamples it (de-jittered)
+//    into both `taaOutput` (lowW x lowH, left in UNORDERED_ACCESS for uToneMapFilter) and an
+//    internal `lowResHdr` reference texture (kept in NON_PIXEL_SHADER_RESOURCE).
+// 3. ResolveTaaTonemap12 runs at the end of the Scene Pass, transferring the exact exposure,
+//    filmic tonemapping, and 3D LUT color grading from `tonemappedLowRes` onto the full-resolution
+//    `upscaledHdr` texture produced at the TAA pass, writing into `finalSceneOutput` (upW x upH).
+ID3D12Resource* BeginTaaUpscale12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                                  unsigned upW, unsigned upH, unsigned lowW, unsigned lowH,
+                                  DXGI_FORMAT format);
+bool FinishTaaUpscale12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                        ID3D12Resource* taaOutput, unsigned upW, unsigned upH,
+                        unsigned lowW, unsigned lowH);
+bool ResolveTaaTonemap12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                         ID3D12Resource* tonemappedLowRes, ID3D12Resource* finalSceneOutput,
+                         unsigned lowW, unsigned lowH, unsigned upW, unsigned upH);
+void ResetTaaUpscale12();
 
 }  // namespace mhwfsr::d3d

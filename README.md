@@ -4,20 +4,18 @@
 
 **MHW-FSR** is an open-source DirectX 12 plugin for [Stracker's Loader](https://www.nexusmods.com/monsterhunterworld/mods/1982) that brings native **AMD FidelityFX FSR 3.1** and next-gen **FSR 4.1** (ML upscaler) to *Monster Hunter: World*.
 
-By intercepting MT Framework's internal TAA pass and camera projection matrices in DirectX 12, the mod replaces the legacy DLSS 1.0 implementation with modern AMD FidelityFX upscaling.
+By intercepting MT Framework's internal TAA pass (`uTemporalAAFilter2::Draw`) and camera projection matrices in DirectX 12, the mod replaces the legacy DLSS 1.0 implementation with modern AMD FidelityFX temporal super-resolution and anti-aliasing.
 
 ---
 
 ## Highlights
 
 - **Universal GPU Support**: Runs natively on AMD Radeon (RDNA 1/2/3/4), Intel Arc, and NVIDIA GeForce GPUs.
-- **AMD FidelityFX Anti-Lag 2**: Native driver-level integration (`amdxc64.dll`). Includes driver-level frame pacing limiter.
-- **FSR 4 ML Upgrade for RDNA 3 & 4**: Automatically leverages AMD's machine-learning upscaler (`FSR 4.1.1`) on RDNA 3 (e.g. RX 7000 series like RX 7700 XT) and RDNA 4 GPUs, while providing high-quality **FSR 3.1.5** temporal upscaling on earlier architectures.
-- **Advanced Latency & Performance Profiler**: Hardware timestamp queries and CPU profiler tracking upscale time, driver pacing sync delay, queue latency, and end-to-end PC Latency.
-- **NativeAA (Native Resolution Anti-Aliasing)**: Replaces MT Framework's blurry legacy TAA with crisp FSR temporal anti-aliasing at 100% native resolution.
-- **Native In-Game Overlay & OSD**: Standalone, hardware-accelerated DirectX 12 overlay built with Dear ImGui. Press **[F10]** or **[Insert]** to open the Control Center anytime in-game.
-- **Real-Time Hot-Reloading**: Seamlessly switch quality presets, customize render scales, adjust RCAS sharpness, toggle FSR architectures, or do live A/B comparisons against vanilla Capcom TAA.
-- **Minimalist Corner OSD Badge**: Displays active upscaler engine, current render resolution %, framerate, and frametimes in real time with configurable INI persistence.
+- **FSR 4 ML Upgrade for RDNA 2, 3 & 4**: Automatically leverages AMD's machine-learning upscaler (**FSR 4.1.2** driver ML on RDNA 2/3/4 or **FSR 4.1.1** DirectML on RDNA 3/4), while providing high-quality **FSR 3.1.5** temporal upscaling on earlier architectures.
+- **NativeAA (Default)**: Replaces MT Framework's blurry legacy TAA with crisp FSR temporal anti-aliasing at 100% native resolution.
+- **True TAA-Pass Upscaling**: Quality (~1.5x), Balanced (~1.7x), Performance (2.0x), and Custom scaling execute directly inside the engine's TAA pass on linear HDR color, reversed-Z depth, dense motion vectors, and Halton sub-pixel jitter, with tonemap color-ratio preservation before HUD rendering.
+- **AMD FidelityFX Anti-Lag 2**: Native driver-level integration (`amdxc64.dll`) with a built-in driver frame rate limiter.
+- **In-Game Control Center & OSD**: Standalone DirectX 12 overlay built with Dear ImGui. Press **[F10]** or **[Insert]** in-game to switch presets, adjust RCAS sharpness, choose FSR 4 models, or view the GPU/CPU latency profiler.
 
 ---
 
@@ -55,13 +53,13 @@ By intercepting MT Framework's internal TAA pass and camera projection matrices 
 2. Launch the game.
 3. In **Options -> Title Menu -> Display -> Advanced Graphics Settings**:
    - Set **DirectX 12 API** to **On**.
-   - Set **NVIDIA DLSS** to **On** (the plugin patches MT Framework's UI check so this option is enabled on all AMD/Intel cards).
+   - Set **NVIDIA DLSS** to **On** (the plugin patches MT Framework's UI check so this option is unlocked on all AMD/Intel/NVIDIA cards).
 
 ---
 
 ## Configuration File (`MHW-FSR.ini`)
 
-All settings can also be modified in `nativePC\plugins\MHW-FSR.ini`, which hot-reloads automatically:
+All settings can be configured via the in-game **[F10]** overlay or in `nativePC\plugins\MHW-FSR.ini`, which hot-reloads automatically:
 
 ```ini
 ; =============================================================================
@@ -69,91 +67,51 @@ All settings can also be modified in `nativePC\plugins\MHW-FSR.ini`, which hot-r
 ; =============================================================================
 ; Quick Start:
 ; 1. In game Display Settings, enable DirectX 12 API.
-; 2. Turn ON "NVIDIA DLSS" (this plugin intercepts and runs native AMD FSR instead).
-; 3. This file is automatically hot-reloaded in real-time while the game is running.
+; 2. Turn ON "NVIDIA DLSS" (this plugin intercepts it to run AMD FSR).
+; 3. Press [F10] or [Insert] in-game to open the MHW-FSR Control Center.
 
 [General]
-; Enabled: 1 = Plugin enabled, 0 = Disabled completely (requires game restart).
+; 1 = Plugin enabled, 0 = Disabled completely (requires game restart).
 Enabled=1
 
-; ShowOSD: 1 = Show the top-left corner overlay (OSD) on startup, 0 = Hidden by default.
+; Top-left corner status badge (OSD).
 ShowOSD=1
-
-; ShowFPS: 1 = Show the FPS & frametime counter inside the OSD, 0 = Hide FPS counter.
 ShowFPS=1
-
-; ShowLatencyOSD: 1 = Show detailed GPU/CPU latency breakdown in OSD, 0 = Compact OSD.
 ShowLatencyOSD=0
 
-; LogLevel: Detail level written to nativePC\plugins\MHW-FSR.log
-; Options: Debug, Info, Warn, Error.
-; (Use 'Debug' to log per-frame render resolutions and full diagnostics).
+; Log detail level written to nativePC\plugins\MHW-FSR.log (Debug, Info, Warn, Error).
 LogLevel=Info
 
 [FSR]
-; -----------------------------------------------------------------------------
 ; QualityPreset: Internal rendering resolution and upscaling mode.
-; Options:
-;   NativeAA         -> Renders at 100% native screen resolution (no upscaling).
-;                       Replaces the game's blurry TAA with FSR's ultra-crisp temporal
-;                       anti-aliasing pass. Highest possible image clarity.
-;   Quality          -> Quality mode (~1.5x scale: e.g., 1706x960 upscaled to 1440p).
-;                       Substantial FPS boost with near-native visual fidelity.
-;   Balanced         -> Balanced mode (~1.7x scale: e.g., 1506x847 upscaled to 1440p).
-;   Performance      -> Performance mode (2.0x scale: e.g., 1280x720 upscaled to 1440p).
-;                       Maximum performance / framerate.
-;   UltraPerformance -> Runs at 0.5 scale (the game engine clamps render scale to >= 0.5).
-;   Custom           -> Uses the custom scale specified in RenderScale below.
-QualityPreset=Quality
+;   NativeAA    -> 100% native screen resolution (replaces blurry vanilla TAA).
+;   Quality     -> ~1.5x scale (66.7% render resolution).
+;   Balanced    -> ~1.7x scale (58.0% render resolution).
+;   Performance ->  2.0x scale (50.0% render resolution).
+;   Custom      -> Uses RenderScale below.
+QualityPreset=NativeAA
 
-; RenderScale: Used only when QualityPreset=Custom (values from 0.50 to 1.00).
-RenderScale=1.0
+; Used only when QualityPreset=Custom (0.50 to 1.00).
+RenderScale=0.75
 
-; -----------------------------------------------------------------------------
-; Version: Upscaler version from the AMD FidelityFX API.
-; Options:
-;   Auto      -> Recommended. Automatically detects your GPU:
-;                - RDNA 3 (e.g. RX 7000 series) & RDNA 4: runs FSR 4 (ML/DirectML).
-;                - Pre-RDNA 3 (RX 6000, 5000, Intel, Nvidia): runs FSR 3.1.5 (Temporal).
-;   FSR 4     -> Forces the FSR 4 Machine Learning upscaler (also accepts: 4.1, FSR4).
-;   FSR 3.1   -> Forces the FSR 3.1 temporal upscaler (also accepts: 3.1.5, FSR3).
-;   0x...     -> Exact hexadecimal provider ID listed in MHW-FSR.log.
-Version=Auto
-
-; -----------------------------------------------------------------------------
-; Sharpness: Integrated post-upscale sharpening (AMD FidelityFX RCAS).
-;   0.00      -> Sharpening off.
-;   0.33      -> Subtle touch of sharpness (recommended for 1440p / 4K).
-;   0.66      -> Moderate sharpness.
-;   1.00      -> Maximum sharpness.
-;   Game      -> Follows the in-game "DLSS Sharpness" slider value.
+; Integrated post-upscale RCAS sharpening (0.00 to 1.00, or Game to follow in-game slider).
 Sharpness=0.33
 
-; -----------------------------------------------------------------------------
-; AutoExposure: Automatic exposure estimation by FSR.
-;   0 = Off (uses MT Framework engine's internal exposure/luminance buffer).
-;   1 = On  (allows FSR to compute its own exposure dynamically).
-AutoExposure=0
+; Upscaler version: Auto (recommended), FSR 4.1.2, FSR 4.1.1, FSR 3.1.5, or hex ID.
+Version=Auto
 
-; -----------------------------------------------------------------------------
-; DLLPath: Directory containing amd_fidelityfx_loader_dx12.dll & amd_fidelityfx_upscaler_dx12.dll.
+; FSR 4.1.2 ML model variant: Auto, Standard, INT8_2, or Lite.
+Model=Auto
+
+; Custom directory containing amd_fidelityfx_loader_dx12.dll & amd_fidelityfx_upscaler_dx12.dll.
 ; Leave empty to use default: nativePC\plugins\MHW-FSR\
 DLLPath=
 
-; -----------------------------------------------------------------------------
-; Bypass: Comparison mode (only active when QualityPreset=NativeAA).
-;   0 = FSR active.
-;   1 = Displays vanilla MT Framework TAA to compare sharpness side by side.
-Bypass=0
-
 [AntiLag]
-; -----------------------------------------------------------------------------
-; AntiLag2: AMD FidelityFX Anti-Lag 2 driver-level latency reduction (Radeon).
-;   1 = Enabled (synchronizes CPU and GPU pacing, reducing click-to-photon latency).
-;   0 = Disabled.
+; AMD FidelityFX Anti-Lag 2 driver-level latency reduction (Radeon GPUs).
 AntiLag2=1
 
-; AntiLagMaxFPS: Framerate limiter via driver pacing (0 = Unlimited).
+; Driver-level framerate limiter in FPS (0 = Unlimited).
 AntiLagMaxFPS=0
 ```
 
@@ -165,7 +123,7 @@ Detailed logs are written to:
 ```
 nativePC\plugins\MHW-FSR.log
 ```
-The log displays the detected GPU, active D3D12 device, queried FSR versions, selected upscaler model, and per-frame dispatch resolutions.
+The log displays the detected GPU, active D3D12 device, queried FSR versions, selected upscaler model, and dispatch resolutions.
 
 ---
 

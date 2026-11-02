@@ -1,5 +1,4 @@
 #include "fsr_context.h"
-#include "barrier_batcher.h"
 #include "config.h"
 #include "d3d_util.h"
 #include "fsr_loader.h"
@@ -177,9 +176,10 @@ bool FsrContext::Ensure(ID3D12Device* device, const Settings& settings) {
         SetActiveFsrVersion(formattedVer);
     }
 
-    LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x}, version {:#x} ({})",
+    bool hdrActive = (settings.flags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE) != 0;
+    LOGI("FSR upscale context created: {}x{} -> {}x{}, flags {:#x} (HDR: {}), version {:#x} ({})",
          settings.renderW, settings.renderH, settings.upscaleW, settings.upscaleH,
-         settings.flags, activeVersionId, ActiveFsrVersion());
+         settings.flags, hdrActive ? "ON" : "OFF (LDR)", activeVersionId, ActiveFsrVersion());
     return true;
 }
 

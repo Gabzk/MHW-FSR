@@ -14,101 +14,69 @@ namespace {
 
 constexpr wchar_t kDefaultIni[] =
     L"; =============================================================================\n"
-    L"; MHW-FSR - AMD FidelityFX FSR 3.1 & FSR 4.1 for Monster Hunter: World (DX12)\n"
+    L"; MHW-FSR - AMD FidelityFX FSR 3.1 & FSR 4 for Monster Hunter: World (DX12)\n"
     L"; =============================================================================\n"
     L"; Quick Start:\n"
     L"; 1. In game Display Settings, enable DirectX 12 API.\n"
-    L"; 2. Turn ON \"NVIDIA DLSS\" (this plugin intercepts and runs native AMD FSR instead).\n"
-    L"; 3. This file is automatically hot-reloaded in real-time while the game is running.\n"
+    L"; 2. Turn ON \"NVIDIA DLSS\" (this plugin intercepts it and runs AMD FSR instead).\n"
+    L"; 3. Press F10 (or Insert) in game to change these settings live.\n"
+    L"; 4. This file is hot-reloaded while the game is running.\n"
     L"\n"
     L"[General]\n"
     L"; Enabled: 1 = Plugin enabled, 0 = Disabled completely (requires game restart).\n"
     L"Enabled=1\n"
     L"\n"
-    L"; ShowOSD: 1 = Show the top-left corner overlay (OSD) on startup, 0 = Hidden by default.\n"
+    L"; ShowOSD: 1 = Show the top-left corner overlay (OSD), 0 = Hidden.\n"
     L"ShowOSD=1\n"
     L"\n"
-    L"; ShowFPS: 1 = Show the FPS & frametime counter inside the OSD, 0 = Hide FPS counter.\n"
+    L"; ShowFPS: 1 = Show the FPS & frametime counter inside the OSD, 0 = Hide it.\n"
     L"ShowFPS=1\n"
     L"\n"
-    L"; ShowLatencyOSD: 1 = Show detailed GPU/CPU latency breakdown in OSD, 0 = Compact OSD.\n"
+    L"; ShowLatencyOSD: 1 = Show the GPU/CPU latency breakdown in the OSD, 0 = Compact OSD.\n"
     L"ShowLatencyOSD=0\n"
     L"\n"
-    L"; LogLevel: Detail level written to nativePC\\plugins\\MHW-FSR.log\n"
-    L"; Options: Debug, Info, Warn, Error.\n"
-    L"; (Use 'Debug' to log per-frame render resolutions and full diagnostics).\n"
+    L"; LogLevel: Detail written to nativePC\\plugins\\MHW-FSR.log (Debug, Info, Warn, Error).\n"
     L"LogLevel=Info\n"
     L"\n"
     L"[FSR]\n"
     L"; -----------------------------------------------------------------------------\n"
-    L"; QualityPreset: Internal rendering resolution and upscaling mode.\n"
-    L"; Options:\n"
-    L";   NativeAA         -> Renders at 100% native screen resolution (no upscaling).\n"
-    L";                       Replaces the game's blurry TAA with FSR's ultra-crisp temporal\n"
-    L";                       anti-aliasing pass. Highest possible image clarity.\n"
-    L";   Quality          -> Quality mode (~1.5x scale: e.g., 1706x960 upscaled to 1440p).\n"
-    L";                       Substantial FPS boost with near-native visual fidelity.\n"
-    L";   Balanced         -> Balanced mode (~1.7x scale: e.g., 1506x847 upscaled to 1440p).\n"
-    L";   Performance      -> Performance mode (2.0x scale: e.g., 1280x720 upscaled to 1440p).\n"
-    L";                       Maximum performance / framerate.\n"
-    L";   UltraPerformance -> Runs at 0.5 scale (the game engine clamps render scale to >= 0.5).\n"
-    L";   Custom           -> Uses the custom scale specified in RenderScale below.\n"
-    L"QualityPreset=Quality\n"
+    L"; QualityPreset: Internal rendering resolution.\n"
+    L";   NativeAA    -> 100% native resolution, FSR replaces the game's blurry TAA.\n"
+    L";                  Best image quality, same performance as the stock game.\n"
+    L";   Quality     -> ~1.5x upscale (e.g. 1707x960 -> 1440p). For handhelds / older PCs.\n"
+    L";   Balanced    -> ~1.7x upscale (e.g. 1506x847 -> 1440p).\n"
+    L";   Performance -> 2.0x upscale (e.g. 1280x720 -> 1440p). The game never renders below 50%.\n"
+    L";   Custom      -> Uses RenderScale below.\n"
+    L"QualityPreset=NativeAA\n"
     L"\n"
-    L"; RenderScale: Used only when QualityPreset=Custom (values from 0.50 to 1.00).\n"
-    L"RenderScale=1.0\n"
+    L"; RenderScale: Used only when QualityPreset=Custom (0.50 to 1.00).\n"
+    L"RenderScale=0.75\n"
     L"\n"
     L"; -----------------------------------------------------------------------------\n"
     L"; Version: Upscaler version from the AMD FidelityFX API.\n"
-    L"; Options:\n"
-    L";   Auto      -> Recommended. Automatically detects your GPU & driver:\n"
-    L";                - RDNA 2 (RX 6000), RDNA 3 (RX 7000) & RDNA 4 (RX 9000): runs FSR 4.1.2 (Driver ML).\n"
-    L";                - Other GPUs (RX 5000, Intel, Nvidia): runs FSR 3.1.5 (Temporal).\n"
-    L";   FSR 4.1.2 -> Forces the AMD driver FSR 4.1.2 Machine Learning upscaler (RDNA 2/3/4).\n"
+    L";   Auto      -> Recommended. Detects your GPU & driver:\n"
+    L";                - RDNA 2 (RX 6000), RDNA 3 (RX 7000) & RDNA 4 (RX 9000): FSR 4.1.2 (driver ML).\n"
+    L";                - Other GPUs (RX 5000, Intel, Nvidia): FSR 3.1.5 (temporal).\n"
+    L";   FSR 4.1.2 -> Forces the AMD driver FSR 4.1.2 machine learning upscaler (RDNA 2/3/4).\n"
     L";   FSR 3.1.5 -> Forces the FSR 3.1.5 temporal upscaler (all DX12 GPUs).\n"
     L";   0x...     -> Exact hexadecimal provider ID listed in MHW-FSR.log.\n"
     L"Version=Auto\n"
     L"\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; Fsr4Model: Internal neural network model variant when running FSR 4.1.2.\n"
-    L"; Options:\n"
-    L";   Auto      -> Uses the GPU architecture default (FP8 on RX 9000, INT8 on RX 7000, INT8-2 on RX 6000).\n"
-    L";   Standard  -> Forces FSR4-i8 (WMMA INT8 - RDNA 3/4 highest quality).\n"
-    L";   RDNA2     -> Forces FSR4-i8-2 (DP4A INT8 - RDNA 2/3/4 faster balanced model).\n"
-    L";   Lite      -> Forces FSR4L-i8 (DP4A INT8 Lite - ~45% faster upscale on RDNA 2/3/4).\n"
+    L"; Fsr4Model: Neural network variant when running FSR 4.1.2.\n"
+    L";   Auto (GPU default), Standard (FSR4-i8, best quality), RDNA2 (FSR4-i8-2, balanced),\n"
+    L";   Lite (FSR4L-i8, fastest).\n"
     L"Fsr4Model=Auto\n"
     L"\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; Sharpness: Integrated post-upscale sharpening (AMD FidelityFX RCAS).\n"
-    L";   0.00      -> Sharpening off.\n"
-    L";   0.33      -> Subtle touch of sharpness (recommended for 1440p / 4K).\n"
-    L";   0.66      -> Moderate sharpness.\n"
-    L";   1.00      -> Maximum sharpness.\n"
-    L";   Game      -> Follows the in-game \"DLSS Sharpness\" slider value.\n"
+    L"; Sharpness: Post-upscale sharpening (AMD FidelityFX RCAS), 0.00 (off) to 1.00 (max).\n"
+    L"; 0.33 is a subtle touch. \"Game\" follows the in-game \"DLSS Sharpness\" slider.\n"
     L"Sharpness=0.33\n"
     L"\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; AutoExposure: Automatic exposure estimation by FSR.\n"
-    L";   1 = On  (Recommended; allows FSR to compute its own HDR luminance exposure dynamically).\n"
-    L";   0 = Off (Disables internal auto-exposure).\n"
-    L"AutoExposure=1\n"
-    L"\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; DLLPath: Directory containing amd_fidelityfx_loader_dx12.dll & amd_fidelityfx_upscaler_dx12.dll.\n"
-    L"; Leave empty to use default: nativePC\\plugins\\MHW-FSR\\\n"
+    L"; DLLPath: Folder with amd_fidelityfx_loader_dx12.dll & amd_fidelityfx_upscaler_dx12.dll.\n"
+    L"; Leave empty to use the default: nativePC\\plugins\\MHW-FSR\\\n"
     L"DLLPath=\n"
     L"\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; Bypass: Comparison mode (only active when QualityPreset=NativeAA).\n"
-    L";   0 = FSR active.\n"
-    L";   1 = Displays vanilla MT Framework TAA to compare sharpness side by side.\n"
-    L"Bypass=0\n"
-    L"\n"
     L"[AntiLag]\n"
-    L"; -----------------------------------------------------------------------------\n"
-    L"; AntiLag2: AMD FidelityFX Anti-Lag 2 driver-level latency reduction (Radeon).\n"
-    L";   1 = Enabled (synchronizes CPU and GPU pacing, reducing click-to-photon latency).\n"
-    L";   0 = Disabled.\n"
+    L"; AntiLag2: AMD FidelityFX Anti-Lag 2 driver-level latency reduction (Radeon only).\n"
     L"AntiLag2=1\n"
     L"\n"
     L"; AntiLagMaxFPS: Framerate limiter via driver pacing (0 = Unlimited).\n"
@@ -120,7 +88,6 @@ unsigned long long g_iniTime = 0;
 std::wstring g_gameOptionsPath;
 unsigned long long g_gameOptionsTime = 0;
 float g_gameSharpness = 0.0f;
-int g_gameFrameRate = 0;
 
 unsigned long long LastWrite(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data;
@@ -129,17 +96,10 @@ unsigned long long LastWrite(const std::wstring& path) {
            data.ftLastWriteTime.dwLowDateTime;
 }
 
-constexpr const wchar_t* kSections[] = {L"General", L"FSR", L"DLSS", L"Advanced"};
-
 std::wstring ReadString(const std::wstring& ini, const wchar_t* section, const wchar_t* key, const wchar_t* def) {
     constexpr wchar_t kMissing[] = L"\x01";
     wchar_t buf[1024];
     GetPrivateProfileStringW(section, key, kMissing, buf, static_cast<DWORD>(std::size(buf)), ini.c_str());
-    for (const wchar_t* other : kSections) {
-        if (wcscmp(buf, kMissing) != 0) break;
-        if (_wcsicmp(other, section) != 0)
-            GetPrivateProfileStringW(other, key, kMissing, buf, static_cast<DWORD>(std::size(buf)), ini.c_str());
-    }
     std::wstring s = wcscmp(buf, kMissing) == 0 ? def : buf;
     for (size_t i = 0; i < s.size(); ++i) {
         if ((s[i] == L';' || s[i] == L'#') && (i == 0 || std::iswspace(s[i - 1]))) {
@@ -203,7 +163,6 @@ float Config::RenderScale() const {
         case QualityMode::Quality: return 2.0f / 3.0f;
         case QualityMode::Balanced: return 1.0f / 1.7f;
         case QualityMode::Performance: return 0.5f;
-        case QualityMode::UltraPerformance: return 0.5f;
         case QualityMode::Custom: return std::clamp(customScale, 0.5f, 1.0f);
     }
     return 1.0f;
@@ -217,7 +176,6 @@ const char* QualityModeName(QualityMode mode) {
         case QualityMode::Quality: return "Quality";
         case QualityMode::Balanced: return "Balanced";
         case QualityMode::Performance: return "Performance";
-        case QualityMode::UltraPerformance: return "UltraPerformance";
         case QualityMode::Custom: return "Custom";
     }
     return "?";
@@ -251,18 +209,15 @@ void LoadConfig(const std::wstring& ini) {
     else if (level == L"error") c.logLevel = LogLevel::Error;
     else c.logLevel = LogLevel::Info;
 
-    auto mode = Lower(ReadString(ini, L"FSR", L"QualityPreset", L""));
-    if (mode.empty()) {
-        mode = Lower(ReadString(ini, L"FSR", L"Mode", L"nativeaa"));
-    }
+    // "UltraPerformance" (removed preset) rendered at the same 50% as Performance.
+    auto mode = Lower(ReadString(ini, L"FSR", L"QualityPreset", L"nativeaa"));
     if (mode == L"quality") c.mode = QualityMode::Quality;
     else if (mode == L"balanced") c.mode = QualityMode::Balanced;
-    else if (mode == L"performance") c.mode = QualityMode::Performance;
-    else if (mode == L"ultraperformance") c.mode = QualityMode::UltraPerformance;
+    else if (mode == L"performance" || mode == L"ultraperformance") c.mode = QualityMode::Performance;
     else if (mode == L"custom") c.mode = QualityMode::Custom;
     else c.mode = QualityMode::NativeAA;
 
-    c.customScale = ReadFloat(ini, L"FSR", L"RenderScale", c.customScale);
+    c.customScale = std::clamp(ReadFloat(ini, L"FSR", L"RenderScale", c.customScale), 0.5f, 1.0f);
 
     auto sharpness = Lower(ReadString(ini, L"FSR", L"Sharpness", L""));
     if (sharpness == L"game")
@@ -270,7 +225,6 @@ void LoadConfig(const std::wstring& ini) {
     else if (!sharpness.empty())
         c.sharpness = std::clamp(ReadFloat(ini, L"FSR", L"Sharpness", c.sharpness), 0.0f, 1.0f);
 
-    c.autoExposure = ReadBool(ini, L"FSR", L"AutoExposure", c.autoExposure);
     c.version = Narrow(ReadString(ini, L"FSR", L"Version", L"Auto"));
 
     auto modelStr = Lower(ReadString(ini, L"FSR", L"Fsr4Model", L"auto"));
@@ -284,39 +238,9 @@ void LoadConfig(const std::wstring& ini) {
         c.fsr4Model = Fsr4Model::Auto;
 
     c.dllPath = ReadString(ini, L"FSR", L"DLLPath", L"");
-    c.bypass = ReadBool(ini, L"FSR", L"Bypass", c.bypass);
 
-    // [AntiLag]
     c.antiLag2 = ReadBool(ini, L"AntiLag", L"AntiLag2", c.antiLag2);
-    c.antiLagMaxFps = std::max(0, static_cast<int>(ReadFloat(ini, L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps))));
-
-    // [Advanced]
-    c.depthInverted = ReadBool(ini, L"Advanced", L"DepthInverted", c.depthInverted);
-    c.depthInfinite = ReadBool(ini, L"Advanced", L"DepthInfinite", c.depthInfinite);
-    c.mvJittered = ReadBool(ini, L"Advanced", L"MVJittered", c.mvJittered);
-    c.mvScaleX = ReadFloat(ini, L"Advanced", L"MotionScaleX", c.mvScaleX);
-    c.mvScaleY = ReadFloat(ini, L"Advanced", L"MotionScaleY", c.mvScaleY);
-    c.jitterScaleX = ReadFloat(ini, L"Advanced", L"JitterScaleX", c.jitterScaleX);
-    c.jitterScaleY = ReadFloat(ini, L"Advanced", L"JitterScaleY", c.jitterScaleY);
-    c.forceJitter = ReadBool(ini, L"Advanced", L"ForceJitter", c.forceJitter);
-    c.fullPixelJitter = ReadBool(ini, L"Advanced", L"FullPixelJitter", c.fullPixelJitter);
-    c.reflectionFix = ReadBool(ini, L"Advanced", L"ReflectionFix", c.reflectionFix);
-    c.cutReset = ReadBool(ini, L"Advanced", L"CutReset", c.cutReset);
-    c.jitterPhases = std::clamp(static_cast<int>(ReadFloat(ini, L"Advanced", L"JitterPhases", -1.0f)), -1, 256);
-    auto mipBias = Lower(ReadString(ini, L"Advanced", L"MipBias", L"auto"));
-    if (mipBias == L"off") c.mipBias = 0.0f;
-    else if (mipBias != L"auto") c.mipBias = std::clamp(ReadFloat(ini, L"Advanced", L"MipBias", 0.0f), -3.0f, 0.0f);
-    c.hdr = static_cast<int>(ReadFloat(ini, L"Advanced", L"HDR", static_cast<float>(c.hdr)));
-    c.exposureScale = ReadFloat(ini, L"Advanced", L"ExposureScale", c.exposureScale);
-    c.preExposure = ReadFloat(ini, L"Advanced", L"PreExposure", c.preExposure);
-
-    c.verboseFrames = ReadBool(ini, L"Advanced", L"VerboseFrames", c.verboseFrames);
-    c.debugProbe = ReadBool(ini, L"Advanced", L"DebugProbe", c.debugProbe);
-    c.debugDumpFrames = static_cast<int>(ReadFloat(ini, L"Advanced", L"DebugDumpFrames", 0.0f));
-    c.debugDumpDelay = std::clamp(ReadFloat(ini, L"Advanced", L"DebugDumpDelay", c.debugDumpDelay), 0.0f, 60.0f);
-    c.debugFixedJitter = ReadBool(ini, L"Advanced", L"DebugFixedJitter", c.debugFixedJitter);
-    c.debugJitterX = ReadFloat(ini, L"Advanced", L"DebugJitterX", c.debugJitterX);
-    c.debugJitterY = ReadFloat(ini, L"Advanced", L"DebugJitterY", c.debugJitterY);
+    c.antiLagMaxFps = std::clamp(static_cast<int>(ReadFloat(ini, L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps))), 0, 1000);
 
     g_config = c;
     g_iniPath = ini;
@@ -334,7 +258,6 @@ void LoadGameOptions(const std::wstring& path) {
     g_gameOptionsPath = path;
     g_gameOptionsTime = LastWrite(path);
     g_gameSharpness = std::clamp(ReadFloat(path, L"GraphicsOption", L"DLSS_Sharpness", 0.0f), 0.0f, 1.0f);
-    g_gameFrameRate = std::max(0, static_cast<int>(ReadFloat(path, L"GraphicsOption", L"FrameRate", 0.0f)));
 }
 
 bool ReloadGameOptionsIfChanged() {
@@ -345,8 +268,6 @@ bool ReloadGameOptionsIfChanged() {
 }
 
 float GameSharpness() { return g_gameSharpness; }
-
-int GameFrameRate() { return g_gameFrameRate; }
 
 void SaveConfig(const Config& c) {
     if (g_iniPath.empty()) return;
@@ -367,13 +288,14 @@ void SaveConfig(const Config& c) {
     writeBool(L"General", L"ShowLatencyOSD", c.showLatencyOsd);
     writeStr(L"FSR", L"QualityPreset", Widen(QualityModeName(c.mode)));
     writeFloat(L"FSR", L"RenderScale", c.customScale);
-    writeFloat(L"FSR", L"Sharpness", c.sharpness);
-    writeBool(L"FSR", L"AutoExposure", c.autoExposure);
+    if (c.sharpness < 0.0f) writeStr(L"FSR", L"Sharpness", L"Game");
+    else writeFloat(L"FSR", L"Sharpness", c.sharpness);
     writeStr(L"FSR", L"Version", Widen(c.version));
     writeStr(L"FSR", L"Fsr4Model", Widen(Fsr4ModelName(c.fsr4Model)));
-    writeBool(L"FSR", L"Bypass", c.bypass);
     writeBool(L"AntiLag", L"AntiLag2", c.antiLag2);
-    writeFloat(L"AntiLag", L"AntiLagMaxFPS", static_cast<float>(c.antiLagMaxFps));
+    wchar_t fps[16];
+    swprintf_s(fps, L"%d", c.antiLagMaxFps);
+    writeStr(L"AntiLag", L"AntiLagMaxFPS", fps);
     g_iniTime = LastWrite(g_iniPath);
 }
 

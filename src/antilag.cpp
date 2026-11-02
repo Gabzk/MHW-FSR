@@ -74,16 +74,6 @@ void Update(bool enabled, uint32_t maxFps) {
     g_active.store(active);
 }
 
-void MarkEndOfFrameRendering() {
-    if (!g_supported.load() || !g_active.load()) return;
-    AMD::AntiLag2DX12::MarkEndOfFrameRendering(&g_context);
-}
-
-void SetFrameGenFrameType(bool bInterpolatedFrame) {
-    if (!g_supported.load() || !g_active.load()) return;
-    AMD::AntiLag2DX12::SetFrameGenFrameType(&g_context, bInterpolatedFrame);
-}
-
 bool IsSupported() {
     return g_supported.load();
 }

@@ -2,14 +2,8 @@
 
 #include <cstdint>
 #include <optional>
-#include <string>
 
 struct ID3D12Resource;
-struct ID3D11Resource;
-
-namespace mhwfsr {
-struct Config;
-}
 
 namespace mhwfsr::game {
 
@@ -17,7 +11,7 @@ namespace mhwfsr::game {
 // device + 0x42700 and created by the game's NGX init wrapper.
 struct DlssContext {
     void* params;          // NVSDK_NGX_Parameter*
-    void* d3d11Context;    // ID3D11DeviceContext* (DX11 only)
+    void* d3d11Context;    // ID3D11DeviceContext* (engine struct slot)
     uint8_t lock[0x28];    // CRITICAL_SECTION
     void* dlssHandle;      // NVSDK_NGX_Handle* for SuperSampling
     void* dlispHandle;     // NVSDK_NGX_Handle* for ImageSignalProcessing
@@ -28,10 +22,11 @@ struct Jitter {
     float x = 0.0f;
     float y = 0.0f;
     uint64_t frame = 0;
-    bool cut = false;  // the camera jumped since the previous frame: DLSS history must not be used
+    bool cut = false;  // the camera jumped since the previous frame: FSR history must not be used
     float fovY = 0.785398f;
     float cameraNear = 0.1f;
     float cameraFar = 1000.0f;
+    bool infiniteDepth = false;
     float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
     float cameraUp[3] = {0.0f, 1.0f, 0.0f};
     float cameraRight[3] = {1.0f, 0.0f, 0.0f};
@@ -41,10 +36,8 @@ struct Jitter {
 // Finds the game globals and hooks the TAA filter. Safe to call under the loader lock. The hooks
 // pass straight through to the game until Activate.
 bool Init();
-// Makes the hooks act, once the NGX side is installed too, with the settings from `config`.
-void Activate(const Config& config);
-// Publishes the settings the hooks read (call after every ini load).
-void ApplyConfig(const Config& config);
+// Makes the hooks act, once the NGX side is installed too.
+void Activate();
 
 // The renderer's device wrapper and the DLSS context living in it.
 uint8_t* Device();
@@ -53,8 +46,6 @@ void SetContext(DlssContext* ctx);
 
 // The game's renderer API; nullopt when the flag could not be located.
 std::optional<bool> IsDx12();
-// ID3D11DeviceContext* the game hands to NGX in DX11 mode.
-void* ImmediateContext11();
 
 // Allocates through the game's operator new, so the game may free the block itself.
 void* GameAlloc(size_t size);
@@ -88,14 +79,10 @@ void** WaitForSingleObjectImport();
 // The renderer's frame counter (0 before the renderer exists).
 uint64_t Frame();
 
-// Re-runs the game's "DLSS settings changed" path so render scale and DLISP use come from
+// Re-runs the game's "DLSS settings changed" path so render scale and scene resolve use come from
 // the current optimal-settings callback. Call from the update callback (main thread), where the
 // game applies graphics options itself, and without holding locks the render thread takes.
 bool RecomputeRenderScale();
-
-// NGX could not be initialised: DLSS cannot run this session, so the game's own anti-aliasing
-// setting is given back.
-void SetDlssUnavailable(bool unavailable);
 
 // Forces renderer DLSS feature bits so game menus unlock the NVIDIA DLSS option on non-NVIDIA GPUs.
 void ForceEnableDlssSupport();
@@ -105,36 +92,16 @@ bool DlssEnabledInGame();
 // NVIDIA DLSS is on in the graphics options, whichever mode the game picked for it.
 bool DlssOptionOn();
 
-// The game will run its DLISP pass this frame (render scale below 1).
-bool DlispActive();
+// The game will run its scene resolve (DLISP) pass this frame (render scale below 1).
+bool SceneResolveActive();
 
-// Render resolution / output resolution as applied this frame (1 for DLAA).
+// Render resolution / output resolution as applied this frame (1 for NativeAA).
 float RenderScale();
-
-// The renderer's DLSS fields, cheap to read and compare every frame.
-struct RendererState {
-    bool exists = false;
-    uint8_t dlssOn = 0;
-    uint8_t dlispOn = 0;
-    uint32_t mode = 0;
-    float dlssScale = 0.0f;
-    uint32_t featureBits = 0;
-    float scaleRequested = 0.0f;
-    float scaleApplied = 0.0f;
-    const void* context = nullptr;
-    bool operator==(const RendererState&) const = default;
-};
-RendererState ReadState();
-// One-line dump of the renderer's DLSS fields, for the log.
-std::string DescribeState(const RendererState& state = ReadState());
 
 // Jitter recorded when the TAA pass that writes `output` was built.
 std::optional<Jitter> JitterForOutput(const void* outputResource);
 
-// Tells the jitter logic that DLSS ran this frame (it only fills in skipped jitter while DLSS runs).
+// Tells the jitter logic that FSR ran this frame (it only fills in skipped jitter while FSR runs).
 void NoteDlssEvaluated();
-
-// Jitter and TAA counters since the previous call, for the log.
-std::string JitterStats();
 
 }  // namespace mhwfsr::game

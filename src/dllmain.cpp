@@ -34,14 +34,11 @@ void Start(HMODULE module) {
 
     LOGI("MHW-FSR {} loaded from {}", MHW_FSR_VERSION, Narrow(dll));
     LOGI("Game: {}", Narrow(exe));
-    LOGI("Config: mode {} (render scale {:.3f}), sharpness {:.2f}{}, autoExposure {}, depthInverted {}, MV scale {},{}, "
-         "jitter scale {},{}, reflection fix {}",
+    LOGI("Config: mode {} (render scale {:.3f}), sharpness {:.2f}{}, version {}, model {}, antiLag2 {}",
          QualityModeName(g_config.mode), g_config.RenderScale(),
          g_config.Sharpness(),
          g_config.sharpness < 0.0f ? " (game option)" : "",
-         g_config.autoExposure,
-         g_config.depthInverted, g_config.mvScaleX, g_config.mvScaleY,
-         g_config.jitterScaleX, g_config.jitterScaleY, g_config.reflectionFix);
+         g_config.version, Fsr4ModelName(g_config.fsr4Model), g_config.antiLag2);
 
     std::error_code ec;
     // Check if an older DLSS version is still present
@@ -75,13 +72,13 @@ void Start(HMODULE module) {
         telemetry::RecordInputSample();
     });
 
-    if (!ngx::Install(dataDir.wstring(), exe.parent_path().wstring())) {
+    if (!ngx::Install()) {
         LOGE("Engine hooks failed, plugin inactive");
         return;
     }
 
     // Activate hooks now that everything is installed
-    game::Activate(g_config);
+    game::Activate();
     LOGI("Ready: turn on NVIDIA DLSS in the game's graphics options to activate AMD FidelityFX FSR");
 }
 

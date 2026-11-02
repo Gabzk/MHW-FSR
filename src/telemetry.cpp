@@ -17,7 +17,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr uint32_t kQueryRingSize = 8;
-constexpr uint32_t kTotalQueries = kQueryRingSize * 4; // [0..15] upscale pairs, [16..31] fg pairs
+constexpr uint32_t kTotalQueries = kQueryRingSize * 2;  // one start/end timestamp pair per upscale slot
 
 std::mutex g_mutex;
 ComPtr<ID3D12QueryHeap> g_queryHeap;
@@ -29,13 +29,9 @@ std::array<int64_t, 16> g_fenceSubmitQpc{};
 LARGE_INTEGER g_qpcFreq{};
 
 std::atomic<uint32_t> g_upscaleWriteSlot{0};
-std::atomic<uint32_t> g_fgWriteSlot{0};
 thread_local int64_t t_upscaleStartQpc = 0;
 thread_local uint32_t t_upscaleSlot = 0;
 thread_local bool t_upscaleQueried = false;
-thread_local int64_t t_fgStartQpc = 0;
-thread_local uint32_t t_fgSlot = 0;
-thread_local bool t_fgQueried = false;
 
 std::atomic<bool> g_profilerActive{false};
 std::atomic<uint64_t> g_gpuTimestampFreq{0};
@@ -44,7 +40,6 @@ std::atomic<int64_t> g_al2StartQpc{0};
 std::atomic<int64_t> g_lastInputPollQpc{0};
 std::atomic<int64_t> g_lastRealPresentQpc{0};
 std::atomic<int64_t> g_lastSwapPresentQpc{0};
-std::atomic<uint64_t> g_generatedFramesTotal{0};
 
 Metrics g_metrics{};
 std::array<float, 120> g_frameTimeHistory{};
@@ -193,45 +188,6 @@ void EndUpscalePass(ID3D12GraphicsCommandList* cl) {
     g_metrics.upscaleCpuMs = SmoothEma(g_metrics.upscaleCpuMs, std::clamp(cpuMs, 0.0f, 50.0f));
 }
 
-void BeginFrameGenPass(ID3D12GraphicsCommandList* cl) {
-    t_fgQueried = false;
-    if (!IsProfilerActive()) return;
-    t_fgStartQpc = NowQpc();
-    if (!cl || !g_queryHeap) return;
-    uint32_t slot = g_fgWriteSlot.fetch_add(1, std::memory_order_relaxed) % kQueryRingSize;
-    t_fgSlot = slot;
-    t_fgQueried = true;
-    uint32_t queryIdx = (kQueryRingSize + slot) * 2;
-    cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx);
-}
-
-void EndFrameGenPass(ID3D12GraphicsCommandList* cl) {
-    if (!IsProfilerActive() && !t_fgQueried) return;
-    int64_t endQpc = NowQpc();
-    float cpuMs = static_cast<float>(QpcToMs(endQpc - t_fgStartQpc));
-
-    if (t_fgQueried && cl && g_queryHeap && g_readbackBuffer) {
-        uint32_t queryIdx = (kQueryRingSize + t_fgSlot) * 2;
-        cl->EndQuery(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx + 1);
-        cl->ResolveQueryData(g_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIdx, 2,
-                             g_readbackBuffer.Get(), static_cast<UINT64>(queryIdx) * sizeof(uint64_t));
-    }
-    t_fgQueried = false;
-
-    std::lock_guard lock(g_mutex);
-    g_metrics.fgCpuMs = SmoothEma(g_metrics.fgCpuMs, std::clamp(cpuMs, 0.0f, 50.0f));
-}
-
-void RecordFgPaceDelay(float delayMs) {
-    if (!IsProfilerActive()) return;
-    std::lock_guard lock(g_mutex);
-    g_metrics.fgPaceDelayMs = SmoothEma(g_metrics.fgPaceDelayMs, std::clamp(delayMs, 0.0f, 50.0f));
-}
-
-void NoteInterpolatedFramePresented() {
-    g_generatedFramesTotal.fetch_add(1, std::memory_order_relaxed);
-}
-
 void OnRealFramePresent(ID3D12CommandQueue* queue) {
     int64_t now = NowQpc();
     int64_t prevReal = g_lastRealPresentQpc.exchange(now, std::memory_order_relaxed);
@@ -311,15 +267,11 @@ void OnRealFramePresent(ID3D12CommandQueue* queue) {
     }
 
     float totalPcLatencyMs = cpuInputToPresentMs + g_metrics.gpuQueueLatencyMs;
-    if (g_metrics.fgGpuMs > 0.01f) {
-        totalPcLatencyMs += g_metrics.fgPaceDelayMs;
-    }
     g_metrics.inputToPresentMs = SmoothEma(g_metrics.inputToPresentMs, totalPcLatencyMs, 0.12f);
 
     if (resolvedUpscaleGpuMs >= 0.0f) {
         g_metrics.upscaleGpuMs = SmoothEma(g_metrics.upscaleGpuMs, resolvedUpscaleGpuMs, 0.15f);
     }
-    g_metrics.generatedFramesTotal = g_generatedFramesTotal.load(std::memory_order_relaxed);
 }
 
 void OnSwapChainPresent() {

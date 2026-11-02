@@ -1,13 +1,14 @@
 #include "d3d_util.h"
 
+#include <d3dcompiler.h>
+#pragma comment(lib, "d3dcompiler.lib")
+
 #include <algorithm>
-#include <cmath>
-#include <cstdio>
+#include <atomic>
 #include <deque>
 #include <iterator>
 #include <mutex>
 #include <utility>
-#include <vector>
 
 #include "log.h"
 
@@ -83,18 +84,6 @@ TextureInfo Info(ID3D12Resource* resource) {
     return info;
 }
 
-TextureInfo Info(ID3D11Resource* resource) {
-    TextureInfo info;
-    ComPtr<ID3D11Texture2D> tex;
-    if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(&tex)))) return info;
-    D3D11_TEXTURE2D_DESC desc;
-    tex->GetDesc(&desc);
-    info.width = desc.Width;
-    info.height = desc.Height;
-    info.format = desc.Format;
-    return info;
-}
-
 bool IsFloatFormat(unsigned f) {
     switch (static_cast<DXGI_FORMAT>(f)) {
         case DXGI_FORMAT_R11G11B10_FLOAT:
@@ -112,176 +101,385 @@ bool IsFloatFormat(unsigned f) {
 
 namespace {
 
-void Transition(ID3D12GraphicsCommandList* cl, ID3D12Resource* a, D3D12_RESOURCE_STATES aBefore,
-                D3D12_RESOURCE_STATES aAfter, ID3D12Resource* b, D3D12_RESOURCE_STATES bBefore,
-                D3D12_RESOURCE_STATES bAfter) {
-    D3D12_RESOURCE_BARRIER barriers[2]{};
-    barriers[0].Transition = {a, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, aBefore, aAfter};
-    barriers[1].Transition = {b, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, bBefore, bAfter};
-    cl->ResourceBarrier(2, barriers);
+constexpr UINT kDescRingSlots = 64;
+constexpr UINT kDescsPerSlot = 5;  // SRV0, SRV1, SRV2, UAV0, UAV1
+
+ID3D12Device* g_bridgeDevice = nullptr;
+ComPtr<ID3D12RootSignature> g_bridgeRootSig;
+ComPtr<ID3D12PipelineState> g_downsamplePso;
+ComPtr<ID3D12PipelineState> g_transferPso;
+ComPtr<ID3D12DescriptorHeap> g_bridgeHeap;
+UINT g_srvUavDescSize = 0;
+std::atomic<uint32_t> g_descRingIdx{0};
+
+ComPtr<ID3D12Resource> g_upscaledHdr;
+ComPtr<ID3D12Resource> g_lowResHdr;
+bool g_upscaledInUav = false;
+bool g_taaUpscaleReady = false;
+
+constexpr char kDownsampleHlsl[] = R"(
+cbuffer Constants : register(b0) {
+    uint2 srcSize;
+    uint2 dstSize;
+    uint useUpscaled;
+};
+Texture2D<float4> SrcTex : register(t0);
+RWTexture2D<float4> DstTaa : register(u0);
+RWTexture2D<float4> DstCopy : register(u1);
+SamplerState LinearClamp : register(s0);
+
+[numthreads(8, 8, 1)]
+void main(uint3 dtid : SV_DispatchThreadID) {
+    if (dtid.x >= dstSize.x || dtid.y >= dstSize.y) return;
+    float2 invDst = 1.0f / float2(dstSize);
+    float2 invSrc = 1.0f / float2(srcSize);
+    float2 uv = (float2(dtid.xy) + 0.5f) * invDst;
+    float2 offset = 0.25f * invSrc;
+    float3 c0 = SrcTex.SampleLevel(LinearClamp, uv + float2(-offset.x, -offset.y), 0).rgb;
+    float3 c1 = SrcTex.SampleLevel(LinearClamp, uv + float2( offset.x, -offset.y), 0).rgb;
+    float3 c2 = SrcTex.SampleLevel(LinearClamp, uv + float2(-offset.x,  offset.y), 0).rgb;
+    float3 c3 = SrcTex.SampleLevel(LinearClamp, uv + float2( offset.x,  offset.y), 0).rgb;
+    float3 avg = (c0 + c1 + c2 + c3) * 0.25f;
+    if (any(isnan(avg)) || any(isinf(avg))) avg = 0.0f;
+    avg = max(avg, 0.0f);
+    DstTaa[dtid.xy] = float4(avg, 1.0f);
+    DstCopy[dtid.xy] = float4(avg, 1.0f);
 }
+)";
 
-}  // namespace
+constexpr char kTransferTonemapHlsl[] = R"(
+cbuffer Constants : register(b0) {
+    uint2 srcSize;
+    uint2 dstSize;
+    uint useUpscaled;
+};
+Texture2D<float4> UpscaledHdr : register(t0);
+Texture2D<float4> LowResHdr : register(t1);
+Texture2D<float4> TonemappedLow : register(t2);
+RWTexture2D<float4> FinalOut : register(u0);
+SamplerState LinearClamp : register(s0);
 
-ID3D12Resource* Mirror12::Update(ID3D12GraphicsCommandList* cl, ID3D12Resource* source) {
-    D3D12_RESOURCE_DESC desc = source->GetDesc();
-    if (texture_) {
-        D3D12_RESOURCE_DESC have = texture_->GetDesc();
-        if (have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format) Reset();
+[numthreads(8, 8, 1)]
+void main(uint3 dtid : SV_DispatchThreadID) {
+    if (dtid.x >= dstSize.x || dtid.y >= dstSize.y) return;
+    float2 uv = (float2(dtid.xy) + 0.5f) / float2(dstSize);
+
+    float3 T_lo = TonemappedLow.SampleLevel(LinearClamp, uv, 0).rgb;
+    if (any(isnan(T_lo)) || any(isinf(T_lo))) T_lo = 0.0f;
+    T_lo = max(T_lo, 0.0f);
+
+    if (useUpscaled == 0) {
+        FinalOut[dtid.xy] = float4(T_lo, 1.0f);
+        return;
     }
-    if (!texture_) {
-        ComPtr<ID3D12Device> device;
-        if (FAILED(source->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
-        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        desc.Alignment = 0;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
-                                                     IID_PPV_ARGS(&texture_));
+
+    float3 H_hi = UpscaledHdr.Load(int3(dtid.xy, 0)).rgb;
+    float3 H_lo = LowResHdr.SampleLevel(LinearClamp, uv, 0).rgb;
+
+    if (any(isnan(H_hi)) || any(isinf(H_hi))) H_hi = H_lo;
+    if (any(isnan(H_lo)) || any(isinf(H_lo))) H_lo = 0.0f;
+    H_hi = max(H_hi, 0.0f);
+    H_lo = max(H_lo, 0.0f);
+
+    const float eps = 1e-3f;
+    float3 oneMinusT = max(1.0f - T_lo, 0.05f);
+    float3 num = T_lo * (H_hi + eps) * (oneMinusT + T_lo);
+    float3 den = oneMinusT * (H_lo + eps) + T_lo * (H_hi + eps);
+    float3 outColor = num / max(den, 1e-5f);
+
+    FinalOut[dtid.xy] = float4(outColor, 1.0f);
+}
+)";
+
+bool EnsureBridgePipeline(ID3D12Device* device) {
+    if (!device) return false;
+    if (g_bridgeDevice == device && g_bridgeRootSig && g_downsamplePso && g_transferPso && g_bridgeHeap) {
+        return true;
+    }
+
+    ResetTaaUpscale12();
+    g_bridgeDevice = device;
+
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 3;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 2;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].RegisterSpace = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[3]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.ShaderRegister = 0;
+    params[0].Constants.RegisterSpace = 0;
+    params[0].Constants.Num32BitValues = 5;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &ranges[0];
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.pDescriptorRanges = &ranges[1];
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0;
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsDesc{};
+    rsDesc.NumParameters = 3;
+    rsDesc.pParameters = params;
+    rsDesc.NumStaticSamplers = 1;
+    rsDesc.pStaticSamplers = &sampler;
+    rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> sigBlob, errBlob;
+    if (FAILED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &errBlob))) {
+        LOGE("TaaUpscaleBridge: failed to serialize root signature: {}",
+             errBlob ? static_cast<const char*>(errBlob->GetBufferPointer()) : "unknown");
+        return false;
+    }
+    if (FAILED(device->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(),
+                                           IID_PPV_ARGS(&g_bridgeRootSig)))) {
+        LOGE("TaaUpscaleBridge: failed to create root signature");
+        return false;
+    }
+
+    auto compilePso = [&](const char* src, size_t len, const char* name, ComPtr<ID3D12PipelineState>& outPso) -> bool {
+        ComPtr<ID3DBlob> csBlob, csErr;
+        HRESULT hr = D3DCompile(src, len, name, nullptr, nullptr, "main", "cs_5_0",
+                                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &csBlob, &csErr);
         if (FAILED(hr)) {
-            LOGE("mirror texture {}x{} fmt {} could not be created ({:#x})", desc.Width, desc.Height,
-                 static_cast<int>(desc.Format), static_cast<unsigned>(hr));
-            return nullptr;
+            LOGE("TaaUpscaleBridge: failed to compile {}: {}", name,
+                 csErr ? static_cast<const char*>(csErr->GetBufferPointer()) : "unknown");
+            return false;
         }
-    }
-    Transition(cl, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE,
-               texture_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-    cl->CopyResource(texture_.Get(), source);
-    Transition(cl, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-               texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    return texture_.Get();
-}
-
-ID3D12Resource* Mirror12::UpdateFromUav(ID3D12GraphicsCommandList* cl, ID3D12Resource* source) {
-    if (!source || !cl) return nullptr;
-    D3D12_RESOURCE_DESC desc = source->GetDesc();
-    if (texture_) {
-        D3D12_RESOURCE_DESC have = texture_->GetDesc();
-        if (have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format) Reset();
-    }
-    if (!texture_) {
-        ComPtr<ID3D12Device> device;
-        if (FAILED(source->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
-        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        desc.Alignment = 0;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
-                                                     IID_PPV_ARGS(&texture_));
-        if (FAILED(hr)) {
-            LOGE("mirror texture {}x{} fmt {} could not be created ({:#x})", desc.Width, desc.Height,
-                 static_cast<int>(desc.Format), static_cast<unsigned>(hr));
-            return nullptr;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc{};
+        psoDesc.pRootSignature = g_bridgeRootSig.Get();
+        psoDesc.CS = {csBlob->GetBufferPointer(), csBlob->GetBufferSize()};
+        if (FAILED(device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&outPso)))) {
+            LOGE("TaaUpscaleBridge: failed to create PSO for {}", name);
+            return false;
         }
+        return true;
+    };
+
+    if (!compilePso(kDownsampleHlsl, sizeof(kDownsampleHlsl) - 1, "DownsampleBoxCS", g_downsamplePso)) return false;
+    if (!compilePso(kTransferTonemapHlsl, sizeof(kTransferTonemapHlsl) - 1, "TransferTonemapCS", g_transferPso)) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.NumDescriptors = kDescRingSlots * kDescsPerSlot;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&g_bridgeHeap)))) {
+        LOGE("TaaUpscaleBridge: failed to create descriptor heap");
+        return false;
     }
-    Transition(cl, source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE,
-               texture_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-    cl->CopyResource(texture_.Get(), source);
-    Transition(cl, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-               texture_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    return texture_.Get();
-}
-
-ID3D11Resource* Mirror11::Update(ID3D11DeviceContext* ctx, ID3D11Resource* source) {
-    ComPtr<ID3D11Texture2D> src;
-    if (FAILED(source->QueryInterface(IID_PPV_ARGS(&src)))) return nullptr;
-    D3D11_TEXTURE2D_DESC desc;
-    src->GetDesc(&desc);
-    if (texture_) {
-        D3D11_TEXTURE2D_DESC have;
-        texture_->GetDesc(&have);
-        if (have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format) texture_.Reset();
-    }
-    if (!texture_) {
-        ComPtr<ID3D11Device> device;
-        ctx->GetDevice(&device);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = 0;
-        desc.MiscFlags = 0;
-        desc.MipLevels = 1;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture_))) {
-            LOGE("mirror texture {}x{} fmt {} could not be created", desc.Width, desc.Height,
-                 static_cast<int>(desc.Format));
-            return nullptr;
-        }
-    }
-    ctx->CopySubresourceRegion(texture_.Get(), 0, 0, 0, 0, source, 0, nullptr);
-    return texture_.Get();
-}
-
-void CopyRect12(ID3D12GraphicsCommandList* cl, ID3D12Resource* dst, ID3D12Resource* src, unsigned x, unsigned y,
-                unsigned w, unsigned h) {
-    Transition(cl, src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE, dst,
-               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    D3D12_TEXTURE_COPY_LOCATION to{};
-    to.pResource = dst;
-    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_TEXTURE_COPY_LOCATION from{};
-    from.pResource = src;
-    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_BOX box{x, y, 0, x + w, y + h, 1};
-    cl->CopyTextureRegion(&to, x, y, 0, &from, &box);
-    Transition(cl, src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, dst,
-               D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-}
-
-void CopyRect11(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src, unsigned x, unsigned y, unsigned w,
-                unsigned h) {
-    D3D11_BOX box{x, y, 0, x + w, y + h, 1};
-    ctx->CopySubresourceRegion(dst, 0, x, y, 0, src, 0, &box);
-}
-
-namespace {
-
-float SmallFloat(uint32_t bits, int manBits) {
-    uint32_t man = bits & ((1u << manBits) - 1), exp = bits >> manBits;
-    if (exp == 31) return 0.0f;
-    if (exp == 0) return std::ldexp(static_cast<float>(man), -14 - manBits);
-    return std::ldexp(1.0f + static_cast<float>(man) / (1u << manBits), static_cast<int>(exp) - 15);
-}
-
-}  // namespace
-
-bool DumpTexture11(ID3D11DeviceContext* ctx, ID3D11Resource* texture, const std::wstring& path) {
-    ComPtr<ID3D11Texture2D> tex;
-    if (FAILED(texture->QueryInterface(IID_PPV_ARGS(&tex)))) return false;
-    D3D11_TEXTURE2D_DESC desc;
-    tex->GetDesc(&desc);
-    if (desc.Format != DXGI_FORMAT_R11G11B10_FLOAT) return false;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-    ComPtr<ID3D11Device> device;
-    ctx->GetDevice(&device);
-    ComPtr<ID3D11Texture2D> staging;
-    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
-    ctx->CopyResource(staging.Get(), texture);
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
-    std::vector<float> rgb(static_cast<size_t>(desc.Width) * desc.Height * 3);
-    for (UINT y = 0; y < desc.Height; ++y) {
-        const uint32_t* row = reinterpret_cast<const uint32_t*>(static_cast<uint8_t*>(m.pData) + y * m.RowPitch);
-        for (UINT x = 0; x < desc.Width; ++x) {
-            float* px = &rgb[(static_cast<size_t>(y) * desc.Width + x) * 3];
-            px[0] = SmallFloat(row[x] & 0x7ff, 6);
-            px[1] = SmallFloat((row[x] >> 11) & 0x7ff, 6);
-            px[2] = SmallFloat(row[x] >> 22, 5);
-        }
-    }
-    ctx->Unmap(staging.Get(), 0);
-    FILE* f = _wfopen(path.c_str(), L"wb");
-    if (!f) return false;
-    fwrite(&desc.Width, 4, 1, f);
-    fwrite(&desc.Height, 4, 1, f);
-    fwrite(rgb.data(), sizeof(float), rgb.size(), f);
-    fclose(f);
+    g_srvUavDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    LOGI("TaaUpscaleBridge: initialized D3D12 compute shaders for TAA-pass upscaling");
     return true;
+}
+
+bool EnsureUavTexture(ID3D12Device* device, ComPtr<ID3D12Resource>& tex, unsigned w, unsigned h, DXGI_FORMAT fmt) {
+    if (tex) {
+        D3D12_RESOURCE_DESC have = tex->GetDesc();
+        if (have.Width == w && have.Height == h && have.Format == fmt) return true;
+        Retire(std::move(tex));
+    }
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = w;
+    desc.Height = h;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = fmt;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                 nullptr, IID_PPV_ARGS(&tex));
+    if (FAILED(hr)) {
+        LOGE("TaaUpscaleBridge: failed to create {}x{} fmt {} texture ({:#x})",
+             w, h, static_cast<int>(fmt), static_cast<unsigned>(hr));
+        return false;
+    }
+    return true;
+}
+
+void WriteSlotDescriptors(ID3D12Device* device, UINT slot,
+                          ID3D12Resource* srv0, ID3D12Resource* srv1, ID3D12Resource* srv2,
+                          ID3D12Resource* uav0, ID3D12Resource* uav1) {
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_bridgeHeap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += static_cast<SIZE_T>(slot * kDescsPerSlot) * g_srvUavDescSize;
+
+    ID3D12Resource* srvs[3] = {srv0, srv1, srv2};
+    for (int i = 0; i < 3; ++i) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = srvs[i]->GetDesc().Format;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(srvs[i], &sd, cpu);
+        cpu.ptr += g_srvUavDescSize;
+    }
+
+    ID3D12Resource* uavs[2] = {uav0, uav1};
+    for (int i = 0; i < 2; ++i) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = uavs[i]->GetDesc().Format;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(uavs[i], nullptr, &ud, cpu);
+        cpu.ptr += g_srvUavDescSize;
+    }
+}
+
+}  // namespace
+
+ID3D12Resource* BeginTaaUpscale12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                                  unsigned upW, unsigned upH, unsigned lowW, unsigned lowH,
+                                  DXGI_FORMAT format) {
+    if (!cl || !device || !upW || !upH || !lowW || !lowH) return nullptr;
+    if (!EnsureBridgePipeline(device)) return nullptr;
+
+    bool hadUpscaled = (g_upscaledHdr != nullptr);
+    if (!EnsureUavTexture(device, g_upscaledHdr, upW, upH, format)) return nullptr;
+    if (!EnsureUavTexture(device, g_lowResHdr, lowW, lowH, format)) return nullptr;
+    if (!hadUpscaled) g_upscaledInUav = false;
+
+    if (!g_upscaledInUav) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition = {g_upscaledHdr.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        cl->ResourceBarrier(1, &b);
+        g_upscaledInUav = true;
+    }
+    return g_upscaledHdr.Get();
+}
+
+bool FinishTaaUpscale12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                        ID3D12Resource* taaOutput, unsigned upW, unsigned upH,
+                        unsigned lowW, unsigned lowH) {
+    if (!cl || !device || !taaOutput || !g_upscaledHdr || !g_lowResHdr) return false;
+
+    D3D12_RESOURCE_BARRIER preBarriers[2]{};
+    preBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    preBarriers[0].Transition = {g_upscaledHdr.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    preBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    preBarriers[1].Transition = {g_lowResHdr.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    cl->ResourceBarrier(2, preBarriers);
+    g_upscaledInUav = false;
+
+    UINT slot = (g_descRingIdx.fetch_add(1, std::memory_order_relaxed)) % kDescRingSlots;
+    WriteSlotDescriptors(device, slot,
+                         g_upscaledHdr.Get(), g_upscaledHdr.Get(), g_upscaledHdr.Get(),
+                         taaOutput, g_lowResHdr.Get());
+
+    ID3D12DescriptorHeap* heaps[] = {g_bridgeHeap.Get()};
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetComputeRootSignature(g_bridgeRootSig.Get());
+    cl->SetPipelineState(g_downsamplePso.Get());
+
+    uint32_t constants[5] = {upW, upH, lowW, lowH, 1u};
+    cl->SetComputeRoot32BitConstants(0, 5, constants, 0);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_bridgeHeap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += static_cast<UINT64>(slot * kDescsPerSlot) * g_srvUavDescSize;
+    cl->SetComputeRootDescriptorTable(1, gpu);
+    gpu.ptr += static_cast<UINT64>(3) * g_srvUavDescSize;
+    cl->SetComputeRootDescriptorTable(2, gpu);
+
+    cl->Dispatch((lowW + 7) / 8, (lowH + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER postBarriers[2]{};
+    postBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    postBarriers[0].Transition = {g_lowResHdr.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    postBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    postBarriers[1].UAV.pResource = taaOutput;
+    cl->ResourceBarrier(2, postBarriers);
+
+    g_taaUpscaleReady = true;
+    return true;
+}
+
+bool ResolveTaaTonemap12(ID3D12GraphicsCommandList* cl, ID3D12Device* device,
+                         ID3D12Resource* tonemappedLowRes, ID3D12Resource* finalSceneOutput,
+                         unsigned lowW, unsigned lowH, unsigned upW, unsigned upH) {
+    if (!cl || !device || !tonemappedLowRes || !finalSceneOutput) return false;
+    if (!EnsureBridgePipeline(device)) return false;
+
+    bool useUpscaled = g_taaUpscaleReady && g_upscaledHdr && g_lowResHdr && !g_upscaledInUav;
+    if (useUpscaled) {
+        D3D12_RESOURCE_DESC upDesc = g_upscaledHdr->GetDesc();
+        if (upDesc.Width != upW || upDesc.Height != upH) {
+            useUpscaled = false;
+        }
+    }
+    ID3D12Resource* srv0 = useUpscaled ? g_upscaledHdr.Get() : tonemappedLowRes;
+    ID3D12Resource* srv1 = useUpscaled ? g_lowResHdr.Get() : tonemappedLowRes;
+    ID3D12Resource* srv2 = tonemappedLowRes;
+
+    UINT slot = (g_descRingIdx.fetch_add(1, std::memory_order_relaxed)) % kDescRingSlots;
+    WriteSlotDescriptors(device, slot, srv0, srv1, srv2, finalSceneOutput, finalSceneOutput);
+
+    ID3D12DescriptorHeap* heaps[] = {g_bridgeHeap.Get()};
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetComputeRootSignature(g_bridgeRootSig.Get());
+    cl->SetPipelineState(g_transferPso.Get());
+
+    uint32_t constants[5] = {lowW, lowH, upW, upH, useUpscaled ? 1u : 0u};
+    cl->SetComputeRoot32BitConstants(0, 5, constants, 0);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_bridgeHeap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += static_cast<UINT64>(slot * kDescsPerSlot) * g_srvUavDescSize;
+    cl->SetComputeRootDescriptorTable(1, gpu);
+    gpu.ptr += static_cast<UINT64>(3) * g_srvUavDescSize;
+    cl->SetComputeRootDescriptorTable(2, gpu);
+
+    cl->Dispatch((upW + 7) / 8, (upH + 7) / 8, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarrier{};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.UAV.pResource = finalSceneOutput;
+    cl->ResourceBarrier(1, &uavBarrier);
+    return true;
+}
+
+void ResetTaaUpscale12() {
+    g_taaUpscaleReady = false;
+    g_upscaledInUav = false;
+    Retire(std::move(g_upscaledHdr));
+    Retire(std::move(g_lowResHdr));
+    g_downsamplePso.Reset();
+    g_transferPso.Reset();
+    g_bridgeRootSig.Reset();
+    g_bridgeHeap.Reset();
+    g_bridgeDevice = nullptr;
 }
 
 }  // namespace mhwfsr::d3d
